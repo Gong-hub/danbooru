@@ -3,9 +3,11 @@
 class Dmail < ApplicationRecord
   attr_accessor :creator_ip_addr, :disable_email_notifications
 
+  dtext_attribute :body # defines :dtext_body
+
   validate :validate_sender_is_not_limited, on: :create
-  validates :title, presence: true, length: { maximum: 200 }, if: :title_changed?
-  validates :body, presence: true, length: { maximum: 50_000 }, if: :body_changed?
+  validates :title, visible_string: true, length: { maximum: 200 }, if: :title_changed?
+  validates :body, visible_string: true, length: { maximum: 50_000 }, if: :body_changed?
 
   belongs_to :owner, :class_name => "User"
   belongs_to :to, :class_name => "User"
@@ -119,7 +121,8 @@ class Dmail < ApplicationRecord
       # XXX hack so that rails' signed_id mechanism works with our pre-existing dmail keys.
       # https://github.com/rails/rails/blob/main/activerecord/lib/active_record/signed_id.rb
       def signed_id_verifier_secret
-        Rails.application.key_generator.generate_key("dmail_link")
+        key_generator = ActiveSupport::KeyGenerator.new(Rails.application.secret_key_base, iterations: 1000, hash_digest_class: OpenSSL::Digest::SHA1)
+        key_generator.generate_key("dmail_link", 64)
       end
 
       def combine_signed_id_purposes(purpose)

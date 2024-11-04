@@ -28,7 +28,7 @@ class PostTest < ActiveSupport::TestCase
   context "Deletion:" do
     context "Expunging a post" do
       setup do
-        @post = create(:post_with_file, uploader: @user, filename: "test.jpg")
+        @post = create(:post_with_file, tag_string: "1girl solo", uploader: @user, filename: "test.jpg")
         Favorite.create!(post: @post, user: @user)
         create(:favorite_group, post_ids: [@post.id])
         perform_enqueued_jobs # perform IqdbAddPostJob
@@ -44,12 +44,12 @@ class PostTest < ActiveSupport::TestCase
       end
 
       should "delete the files" do
-        assert_nothing_raised { @post.file(:preview) }
+        assert_nothing_raised { @post.file(:"180x180") }
         assert_nothing_raised { @post.file(:original) }
 
         @post.expunge!
 
-        assert_raise(StandardError) { @post.file(:preview) }
+        assert_raise(StandardError) { @post.file(:"180x180") }
         assert_raise(StandardError) { @post.file(:original) }
       end
 
@@ -87,6 +87,16 @@ class PostTest < ActiveSupport::TestCase
         assert_nil(ModAction.last.subject)
       end
 
+      should "decrement the tag post counts" do
+        assert_equal(1, Tag.find_by_name("1girl").post_count)
+        assert_equal(1, Tag.find_by_name("solo").post_count)
+
+        @post.expunge!
+
+        assert_equal(0, Tag.find_by_name("1girl").post_count)
+        assert_equal(0, Tag.find_by_name("solo").post_count)
+      end
+
       should "decrement the uploader's upload count" do
         assert_difference("@post.uploader.reload.post_upload_count", -1) do
           @post.expunge!
@@ -113,6 +123,7 @@ class PostTest < ActiveSupport::TestCase
       end
 
       should "remove the post from iqdb" do
+        mock_iqdb_remove_post!(@post)
         @post.expunge!
         perform_enqueued_jobs
         assert_performed_jobs(1, only: IqdbRemovePostJob)
@@ -166,15 +177,6 @@ class PostTest < ActiveSupport::TestCase
         end
       end
 
-      context "with the banned_artist tag" do
-        should "also ban the post" do
-          post = FactoryBot.create(:post, :tag_string => "banned_artist")
-          post.delete!("test")
-          post.reload
-          assert(post.is_banned?)
-        end
-      end
-
       context "that is still in cooldown after being flagged" do
         should "succeed" do
           flag = create(:post_flag)
@@ -196,6 +198,47 @@ class PostTest < ActiveSupport::TestCase
 
   context "Parenting:" do
     context "Assigning a parent to a post" do
+      should "not allow a post to be its own parent" do
+        post = create(:post)
+        post.update(parent_id: post.id)
+
+        assert_equal(["Post cannot have itself as a parent"], post.errors[:base])
+      end
+
+      should "not allow a post to be its own great-grandparent" do
+        p1 = create(:post)
+        p2 = create(:post)
+        p3 = create(:post)
+
+        p1.update(parent: p2)
+        p2.update(parent: p3)
+        p3.update(parent: p1)
+
+        assert_equal(["Post cannot have itself as a parent"], p3.errors[:base])
+      end
+
+      should "not allow parent-child relationships more than 4 levels deep" do
+        p1 = create(:post, parent: nil)
+        p2 = create(:post, parent: p1)
+        p3 = create(:post, parent: nil)
+        p4 = create(:post, parent: p3)
+        p5 = create(:post, parent: p4)
+
+        p3.update(parent: p2)
+
+        assert_equal(["Post cannot have a parent-child chain more than 4 levels deep"], p3.errors[:base])
+      end
+
+      should "not allow a post to have too many children" do
+        p1 = create(:post)
+        p2 = create(:post)
+        create_list(:post, Post::MAX_CHILD_POSTS, parent: p1)
+
+        p2.update(parent: p1)
+
+        assert_equal(["post ##{p1.id} cannot have more than 30 child posts"], p2.errors[:base])
+      end
+
       should "update the has_children flag on the parent" do
         p1 = FactoryBot.create(:post)
         assert(!p1.has_children?, "Parent should not have any children")
@@ -369,8 +412,11 @@ class PostTest < ActiveSupport::TestCase
       context "with a new tag" do
         should "create the new tag" do
           tag1 = create(:tag, name: "foo", post_count: 100, category: Tag.categories.character)
-          create(:post, tag_string: "foo bar")
+          post = create(:post, tag_string: "foo bar")
           tag2 = Tag.find_by_name("bar")
+
+          assert_equal(1, post.tag_count_general)
+          assert_equal(1, post.tag_count_character)
 
           assert_equal(101, tag1.reload.post_count)
           assert_equal(Tag.categories.character, tag1.category)
@@ -383,17 +429,12 @@ class PostTest < ActiveSupport::TestCase
       end
 
       context "with a banned artist" do
-        setup do
-          CurrentUser.scoped(FactoryBot.create(:admin_user)) do
-            @artist = FactoryBot.create(:artist)
-            @artist.ban!
-            perform_enqueued_jobs
-          end
-          @post = FactoryBot.create(:post, :tag_string => @artist.name)
-        end
-
         should "ban the post" do
-          assert_equal(true, @post.is_banned?)
+          artist = create(:artist)
+          implication = create(:tag_implication, antecedent_name: artist.name, consequent_name: "banned_artist")
+          post = create(:post, tag_string: artist.name)
+
+          assert_equal(true, post.is_banned?)
         end
       end
 
@@ -412,7 +453,7 @@ class PostTest < ActiveSupport::TestCase
         end
 
         should "1234 update the category cache of the tag" do
-          assert_equal(Tag.categories.copyright, Cache.get("tc:#{Cache.hash('abc')}"))
+          assert_equal(Tag.categories.copyright, Cache.get("tag-category:#{Cache.hash('abc')}"))
         end
 
         should "update the tag counts of the posts" do
@@ -481,6 +522,9 @@ class PostTest < ActiveSupport::TestCase
           assert_invalid_tag("foo\abar")
           assert_invalid_tag("café")
           assert_invalid_tag("東方")
+          assert_invalid_tag("gen:char:foo")
+          assert_invalid_tag("general:newpool:a")
+          assert_invalid_tag("general:rating:g")
         end
 
         context "that already exists" do
@@ -547,6 +591,8 @@ class PostTest < ActiveSupport::TestCase
           @post.update!(tag_string: "asd char:a_bad_tag")
 
           assert_equal("asd", @post.reload.tag_string)
+          assert_equal(0, @post.tag_count_character)
+          assert_equal(1, @post.tag_count_general)
           assert_match(/The following tags are deprecated and could not be added: \[\[a_bad_tag\]\]/, @post.warnings.full_messages.join)
         end
 
@@ -562,11 +608,13 @@ class PostTest < ActiveSupport::TestCase
       context "tagged with a metatag" do
         context "for a tag category prefix" do
           should "set the category of a new tag" do
-            create(:post, tag_string: "char:chen")
+            post = create(:post, tag_string: "char:chen")
             tag = Tag.find_by_name("chen")
 
             assert_equal(Tag.categories.character, tag.category)
             assert_equal(0, tag.versions.count)
+            assert_equal(1, post.tag_count_character)
+            assert_equal(0, post.tag_count_general)
           end
 
           should "change the category of an existing tag" do
@@ -575,6 +623,8 @@ class PostTest < ActiveSupport::TestCase
             post = as(user) { create(:post, tag_string: "char:hoge") }
 
             assert_equal(Tag.categories.character, tag.reload.category)
+            assert_equal(1, post.tag_count_character)
+            assert_equal(0, post.tag_count_general)
 
             assert_equal(2, tag.versions.count)
             assert_equal(1, tag.first_version.version)
@@ -588,13 +638,35 @@ class PostTest < ActiveSupport::TestCase
             assert_equal(Tag.categories.character, tag.last_version.category)
           end
 
-          should "change the category for an aliased tag" do
+          should "update the tag category counts for all posts with the tag" do
+            post1 = create(:post, tag_string: "chen")
+            post2 = create(:post, tag_string: "chen")
+
+            assert_equal(1, post1.tag_count_general)
+            assert_equal(0, post1.tag_count_character)
+            assert_equal(1, post2.tag_count_general)
+            assert_equal(0, post2.tag_count_character)
+
+            post1.update!(tag_string: "char:chen")
+            perform_enqueued_jobs(only: UpdateTagCategoryPostCountsJob)
+            post1.reload
+            post2.reload
+
+            assert_equal(0, post1.tag_count_general)
+            assert_equal(1, post1.tag_count_character)
+            assert_equal(0, post2.tag_count_general)
+            assert_equal(1, post2.tag_count_character)
+          end
+
+          should "not change the category for an aliased tag" do
             create(:tag_alias, antecedent_name: "hoge", consequent_name: "moge")
             post = create(:post, tag_string: "char:hoge")
 
             assert_equal(["moge"], post.tag_array)
             assert_equal(Tag.categories.general, Tag.find_by_name("moge").category)
-            assert_equal(Tag.categories.character, Tag.find_by_name("hoge").category)
+            assert_equal(Tag.categories.general, Tag.find_by_name("hoge").category)
+            assert_equal(0, post.tag_count_character)
+            assert_equal(1, post.tag_count_general)
           end
 
           should "not raise an exception for an invalid tag name" do
@@ -603,6 +675,19 @@ class PostTest < ActiveSupport::TestCase
             assert_match(/Couldn't add tag: 'copy:blah' cannot begin with 'copy:'/, post.warnings[:base].join("\n"))
             assert_equal(["tagme"], post.tag_array)
             assert_equal(false, Tag.exists?(name: "copy:blah"))
+            assert_equal(0, post.tag_count_character)
+            assert_equal(0, post.tag_count_copyright)
+            assert_equal(1, post.tag_count_general)
+          end
+
+          should "not raise an exception for char:newpool:blah" do
+            post = create(:post, tag_string: "tagme char:newpool:blah")
+
+            assert_match(/Couldn't add tag: 'newpool:blah' cannot begin with 'newpool:'/, post.warnings[:base].join("\n"))
+            assert_equal(["tagme"], post.tag_array)
+            assert_equal(false, Tag.exists?(name: "newpool:blah"))
+            assert_equal(0, post.tag_count_character)
+            assert_equal(1, post.tag_count_general)
           end
         end
 
@@ -790,25 +875,25 @@ class PostTest < ActiveSupport::TestCase
             @post.update!(tag_string: " a b c ")
             assert_equal("a b c", @post.tag_string)
 
-            @post.update!(tag_string: 'newpool:b\  a')
+            @post.update!(tag_string: 'newpool:b123\  a')
             assert_equal("a", @post.tag_string)
-            assert_equal("b", Pool.last.name)
+            assert_equal("b123", Pool.last.name)
 
-            @post.update!(tag_string: 'a newpool:c\ ')
+            @post.update!(tag_string: 'a newpool:c123\ ')
             assert_equal("a", @post.tag_string)
-            assert_equal("c", Pool.last.name)
+            assert_equal("c123", Pool.last.name)
 
-            @post.update!(tag_string: 'a newpool:d\  ')
+            @post.update!(tag_string: 'a newpool:d123\  ')
             assert_equal("a", @post.tag_string)
-            assert_equal("d", Pool.last.name)
+            assert_equal("d123", Pool.last.name)
 
             @post.update!(tag_string: 'newpool:e\ a')
             assert_equal("tagme", @post.tag_string)
             assert_equal("e_a", Pool.last.name)
 
-            @post.update!(tag_string: 'a newpool:f\\')
+            @post.update!(tag_string: 'a newpool:f123\\')
             assert_equal("a", @post.tag_string)
-            assert_equal("f\\", Pool.last.name)
+            assert_equal("f123\\", Pool.last.name)
           end
         end
 
@@ -1103,6 +1188,13 @@ class PostTest < ActiveSupport::TestCase
             assert_equal(false, @post.valid?)
             assert_equal(["is too long (maximum is 1200 characters)"], @post.errors[:source])
           end
+
+          should "validate the maximum number of tags" do
+            @post.update(tag_string: (1..Post::MAX_TAG_COUNT + 1).to_a.join(" "))
+
+            assert_equal(false, @post.valid?)
+            assert_equal(["Post cannot have more than #{Post::MAX_TAG_COUNT} tags"], @post.errors[:base])
+          end
         end
 
         context "of" do
@@ -1264,6 +1356,33 @@ class PostTest < ActiveSupport::TestCase
         end
       end
 
+      context "a silent video with the sound tag" do
+        should "automatically remove the sound tag" do
+          @media_asset = MediaAsset.upload!("test/files/mp4/test-silent-audio.mp4")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "sound")
+          assert_equal("animated", @post.tag_string)
+        end
+      end
+
+      context "an audible video without the sound tag" do
+        should "automatically add the sound tag" do
+          @media_asset = MediaAsset.upload!("test/files/mp4/test-audio.mp4")
+          @post.update!(md5: @media_asset.md5)
+          @post.reload.update!(tag_string: "tagme")
+          assert_equal("animated sound tagme", @post.tag_string)
+        end
+      end
+
+      context "a Flash file with the sound tag" do
+        should "not automatically remove the sound tag" do
+          @post = create(:post, file_ext: "swf", media_asset: build(:media_asset, file_ext: "swf"))
+          @post.update!(tag_string: "sound")
+
+          assert_equal("flash sound", @post.tag_string)
+        end
+      end
+
       context "a post with a non-web source" do
         should "automatically add the non-web_source tag" do
           @post.update!(source: "this was once revealed to me in a dream")
@@ -1304,6 +1423,16 @@ class PostTest < ActiveSupport::TestCase
           assert_equal("bad_link tag1 tag2", @post.tag_string)
         end
 
+        should "not add the bad_link tag for recognized but unhandled sources" do
+          @post.update!(tag_string: "tag1 tag2", source: "https://i.etsystatic.com/isbl/ef769d/65460303/isbl_3360x840.65460303_idqpnurw.jpg")
+          assert_equal("tag1 tag2", @post.tag_string)
+        end
+
+        should "not remove bad_link tag for recognized but unhandled sources" do
+          @post.update!(tag_string: "bad_link tag1 tag2", source: "https://i.etsystatic.com/isbl/ef769d/65460303/isbl_3360x840.65460303_idqpnurw.jpg")
+          assert_equal("bad_link tag1 tag2", @post.tag_string)
+        end
+
         should "remove the bad_link tag when using the source: metatag" do
           @post.update!(tag_string: "aaa source:https://pbs.twimg.com/media/FQjQA1mVgAMcHLv.jpg:orig")
           assert_equal("aaa bad_link", @post.tag_string)
@@ -1338,6 +1467,16 @@ class PostTest < ActiveSupport::TestCase
           assert_equal("bad_source tag1 tag2", @post.tag_string)
         end
 
+        should "not add the bad_source tag for recognized but unhandled sources" do
+          @post.update!(tag_string: "tag1 tag2", source: "https://www.etsy.com/shop/yeurei")
+          assert_equal("tag1 tag2", @post.tag_string)
+        end
+
+        should "not remove the bad_source tag for recognized but unhandled sources" do
+          @post.update!(tag_string: "bad_source tag1 tag2", source: "https://www.etsy.com/shop/yeurei")
+          assert_equal("bad_source tag1 tag2", @post.tag_string)
+        end
+
         should "remove the bad_source tag when using the source: metatag" do
           @post.update!(tag_string: "aaa source:https://twitter.com/danboorubot/")
           assert_equal("aaa bad_source", @post.tag_string)
@@ -1357,7 +1496,7 @@ class PostTest < ActiveSupport::TestCase
 
       context "a post with a https:// source" do
         should "remove the non-web_source tag" do
-          @post.update!(source: "https://www.google.com", tag_string: "non-web_source")
+          @post.update!(source: "https://www.example.com", tag_string: "non-web_source")
           @post.save!
           assert_equal("tagme", @post.tag_string)
         end
@@ -1701,6 +1840,13 @@ class PostTest < ActiveSupport::TestCase
             assert_equal("Blog.", @post.source)
           end
         end
+
+        context "that is an IP address" do
+          should "not raise an exception" do
+            @post.update!(source: "http://127.0.0.1/image.jpg")
+            assert_equal("http://127.0.0.1/image.jpg", @post.source)
+          end
+        end
       end
 
       context "when validating tags" do
@@ -2022,7 +2168,7 @@ class PostTest < ActiveSupport::TestCase
     should "generate the correct urls for animated gifs" do
       @post = create(:post_with_file, filename: "test-animated-86x52.gif")
 
-      assert_equal("https://www.example.com/data/preview/77/d8/77d89bda37ea3af09158ed3282f8334f.jpg", @post.preview_file_url)
+      assert_equal("https://www.example.com/data/180x180/77/d8/77d89bda37ea3af09158ed3282f8334f.jpg", @post.preview_file_url)
       assert_equal("https://www.example.com/data/original/77/d8/77d89bda37ea3af09158ed3282f8334f.gif", @post.large_file_url)
       assert_equal("https://www.example.com/data/original/77/d8/77d89bda37ea3af09158ed3282f8334f.gif", @post.file_url)
     end

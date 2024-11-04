@@ -28,7 +28,7 @@ class ExifTool
   # @return [ExifTool::Metadata] the file's metadata
   def metadata(options: DEFAULT_OPTIONS)
     output = %x(exiftool #{options} -json #{file.path.shellescape})
-    json = JSON.parse(output).first
+    json = output.parse_json.first
     json = json.except("SourceFile")
     ExifTool::Metadata.new(json.with_indifferent_access)
   end
@@ -45,6 +45,10 @@ class ExifTool
     # @param [Hash] a hash of metadata as returned by ExifTool
     def initialize(metadata)
       @metadata = metadata
+    end
+
+    def merge(hash)
+      Metadata.new(metadata.merge(hash))
     end
 
     def is_animated?
@@ -110,14 +114,22 @@ class ExifTool
     end
 
     # https://danbooru.donmai.us/posts?tags=exif:PNG:Software=NovelAI
+    # https://danbooru.donmai.us/posts?tags=exif:"PNG:Title=AI generated image"
     # https://danbooru.donmai.us/posts?tags=exif:PNG:Parameters
     # https://danbooru.donmai.us/posts?tags=exif:PNG:Sd-metadata
     # https://danbooru.donmai.us/posts?tags=exif:PNG:Dream
     def is_ai_generated?
       metadata["PNG:Software"] == "NovelAI" ||
+        metadata["PNG:Title"] == "AI generated image" ||
+        metadata["PNG:Description"]&.match?(/masterpiece|best quality/) ||
         metadata.has_key?("PNG:Parameters") ||
         metadata.has_key?("PNG:Sd-metadata") ||
         metadata.has_key?("PNG:Dream")
+    end
+
+    # True if the video has audible sound. False if the video doesn't have an audio track, or the audio track is inaudible.
+    def has_sound?
+      metadata["FFmpeg:AudioPeakLoudness"].to_f >= 0.0003 # -70 dB
     end
 
     def width

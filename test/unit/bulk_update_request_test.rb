@@ -4,7 +4,7 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
   def create_bur!(script, approver)
     bur = create(:bulk_update_request, script: script)
     bur.approve!(approver)
-    perform_enqueued_jobs
+    perform_enqueued_jobs(only: ProcessBulkUpdateRequestJob)
     bur
   end
 
@@ -32,6 +32,25 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
           assert_equal(true, @bur.valid?)
           assert_equal(true, @tag.reload.artist?)
           assert_equal("approved", @bur.reload.status)
+        end
+
+        should "update the tag category counts for all posts with the tag" do
+          post1 = create(:post, tag_string: "chen")
+          post2 = create(:post, tag_string: "chen")
+
+          assert_equal(1, post1.tag_count_general)
+          assert_equal(0, post1.tag_count_character)
+          assert_equal(1, post2.tag_count_general)
+          assert_equal(0, post2.tag_count_character)
+
+          create_bur!("category chen -> character", @admin)
+          post1.reload
+          post2.reload
+
+          assert_equal(0, post1.tag_count_general)
+          assert_equal(1, post1.tag_count_character)
+          assert_equal(0, post2.tag_count_general)
+          assert_equal(1, post2.tag_count_character)
         end
 
         should "fail if the tag doesn't already exist" do
@@ -228,7 +247,7 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
 
         should "fail for a child tag that is too small" do
           @t1 = create(:tag, name: "white_shirt", post_count: 9)
-          @t2 = create(:tag, name: "shirt", post_count: 1000000)
+          @t2 = create(:tag, name: "shirt", post_count: 1_000_000)
           create(:wiki_page, title: "white_shirt")
           create(:wiki_page, title: "shirt")
           @bur = build(:bulk_update_request, script: "imply white_shirt -> shirt")
@@ -239,6 +258,19 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
           @t1.update!(post_count: 99)
           assert_equal(false, @bur.valid?)
           assert_equal(["Can't create implication white_shirt -> shirt ('white_shirt' must have at least 100 posts)"], @bur.errors.full_messages)
+        end
+
+        should "display the correct amount of required posts" do
+          create(:tag, name: "speech_bubble_censor", post_count: 20)
+          create(:wiki_page, title: "speech_bubble_censor")
+
+          create(:tag, name: "speech_bubble", post_count: 202_174)
+          create(:wiki_page, title: "speech_bubble")
+
+          @bur = build(:bulk_update_request, script: "imply speech_bubble_censor -> speech_bubble")
+
+          assert_equal(false, @bur.valid?)
+          assert_equal(["Can't create implication speech_bubble_censor -> speech_bubble ('speech_bubble_censor' must have at least 21 posts)"], @bur.errors.full_messages)
         end
 
         should "fail if the antecedent name is invalid" do
@@ -691,7 +723,7 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
         @bur.approve!(@admin)
         assert_equal("processing", @bur.status)
 
-        assert_raises(RuntimeError) { perform_enqueued_jobs }
+        assert_raises(RuntimeError) { perform_enqueued_jobs(only: ProcessBulkUpdateRequestJob) }
         assert_equal("failed", @bur.reload.status)
 
         assert_equal("active", TagAlias.find_by!(antecedent_name: "one", consequent_name: "two").status)
@@ -707,7 +739,7 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
 
         TagAlias.any_instance.stubs(:process!).raises(RuntimeError.new("oh no"))
         @bur.approve!(@admin)
-        assert_raises(RuntimeError) { perform_enqueued_jobs }
+        assert_raises(RuntimeError) { perform_enqueued_jobs(only: ProcessBulkUpdateRequestJob) }
 
         assert_equal("aaa foo", @post.reload.tag_string)
 
@@ -722,7 +754,7 @@ class BulkUpdateRequestTest < ActiveSupport::TestCase
 
         TagAlias.any_instance.unstub(:process!)
         @bur.approve!(@admin)
-        perform_enqueued_jobs
+        perform_enqueued_jobs(only: ProcessBulkUpdateRequestJob)
 
         assert_equal("aaa bar", @post.reload.tag_string)
 

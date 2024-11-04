@@ -14,7 +14,7 @@
 
       <% t.column "Comment", td: {class: "col-expand"} do |vote| %>
         <div class="prose">
-          <%= format_text(vote.comment.body) %>
+          <%= vote.comment.dtext_body.format_text %>
         </div>
       <% end %>
 
@@ -41,7 +41,7 @@
       <% t.column column: "control" do |vote| %>
         <% if policy(vote).destroy? %>
           <%= render PopupMenuComponent.new do |menu| %>
-            <% menu.item do %>
+            <% menu.with_item do %>
               <%= link_to "Remove", comment_vote_path(vote, variant: "listing"), remote: true, method: :delete %>
             <% end %>
           <% end %>

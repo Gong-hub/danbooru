@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class MediaAssetsController < ApplicationController
-  respond_to :html, :json, :xml
+  respond_to :html, :json, :xml, :js
 
   rate_limit :image, rate: 5.0/1.seconds, burst: 50
 
@@ -15,7 +15,7 @@ class MediaAssetsController < ApplicationController
   end
 
   def show
-    @media_asset = authorize MediaAsset.find(params[:id])
+    @media_asset = authorize MediaAsset.includes(uploads: :uploader).find(params[:id])
     @post = Post.find_by_md5(@media_asset.md5)
 
     if CurrentUser.is_owner? && request.format.symbol.in?(%i[jpeg webp avif])
@@ -36,11 +36,18 @@ class MediaAssetsController < ApplicationController
     end
   end
 
+  def destroy
+    @media_asset = authorize MediaAsset.find(params[:id])
+    @media_asset.trash!(CurrentUser.user)
+    flash[:notice] = "File deleted"
+    respond_with(@media_asset)
+  end
+
   def image
     media_asset = authorize MediaAsset.find(params[:media_asset_id])
     variant = media_asset.variant(params[:variant])
     raise ActiveRecord::RecordNotFound if variant.nil?
 
-    redirect_to variant.file_url
+    redirect_to variant.file_url, allow_other_host: true
   end
 end

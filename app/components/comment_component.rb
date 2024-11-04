@@ -1,13 +1,14 @@
 # frozen_string_literal: true
 
 class CommentComponent < ApplicationComponent
-  attr_reader :comment, :context, :dtext_data, :current_user
+  attr_reader :comment, :context, :classes, :dtext_references, :current_user
 
-  def initialize(comment:, current_user:, context: nil, dtext_data: nil)
+  def initialize(comment:, current_user:, context: nil, classes: nil, dtext_references: DText.preprocess(comment.body))
     super
     @comment = comment
     @context = context
-    @dtext_data = dtext_data
+    @classes = classes
+    @dtext_references = dtext_references
     @current_user = current_user
   end
 
@@ -42,10 +43,14 @@ class CommentComponent < ApplicationComponent
   end
 
   def current_vote
-    @current_vote ||= comment.votes.active.find { |v| v.user_id == current_user.id }
+    @current_vote ||= comment.active_votes.find { |v| v.user_id == current_user.id }
   end
 
   def reported?
     policy(ModerationReport).can_see_moderation_reports? && comment.pending_moderation_reports.present?
+  end
+
+  def component_state
+    { component: { classes: classes, context: context }}
   end
 end

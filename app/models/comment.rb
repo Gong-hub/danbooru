@@ -1,6 +1,11 @@
 # frozen_string_literal: true
 
 class Comment < ApplicationRecord
+  MAX_IMAGES = 1
+  MAX_VIDEO_SIZE = 1.megabyte
+  MAX_LARGE_EMOJI = 1
+  MAX_SMALL_EMOJI = 100
+
   attr_accessor :creator_ip_addr
 
   belongs_to :post
@@ -10,9 +15,12 @@ class Comment < ApplicationRecord
   has_many :moderation_reports, as: :model, dependent: :destroy
   has_many :pending_moderation_reports, -> { pending }, as: :model, class_name: "ModerationReport"
   has_many :votes, class_name: "CommentVote", dependent: :destroy
+  has_many :reactions, as: :model, dependent: :destroy, class_name: "Reaction"
+  has_many :active_votes, -> { active }, class_name: "CommentVote"
   has_many :mod_actions, as: :subject, dependent: :destroy
 
-  validates :body, presence: true, length: { maximum: 15_000 }, if: :body_changed?
+  validates :body, visible_string: true, length: { maximum: 15_000 }, if: :body_changed?
+  validate :validate_body, if: :body_changed?
 
   before_create :autoreport_spam
   before_save :handle_reports_on_deletion
@@ -26,10 +34,12 @@ class Comment < ApplicationRecord
   end
 
   deletable
+  dtext_attribute :body, media_embeds: true # defines :dtext_body
+
   mentionable(
     message_field: :body,
     title: ->(_user_name) {"#{creator.name} mentioned you in a comment on post ##{post_id}"},
-    body: ->(user_name) {"@#{creator.name} mentioned you in comment ##{id} on post ##{post_id}:\n\n[quote]\n#{DText.extract_mention(body, "@#{user_name}")}\n[/quote]\n"}
+    body: ->(user_name) {"@#{creator.name} mentioned you in comment ##{id} on post ##{post_id}:\n\n[quote]\n#{DText.new(body).extract_mention("@#{user_name}")}\n[/quote]\n"}
   )
 
   module SearchMethods
@@ -69,6 +79,33 @@ class Comment < ApplicationRecord
 
   extend SearchMethods
 
+  def validate_body
+    if dtext_body.block_emoji_names.count > MAX_LARGE_EMOJI
+      errors.add(:base, "Can't include more than #{MAX_LARGE_EMOJI} #{"sticker".pluralize(MAX_LARGE_EMOJI)}")
+    end
+
+    if dtext_body.inline_emoji_names.count > MAX_SMALL_EMOJI
+      errors.add(:base, "Can't include more than #{MAX_SMALL_EMOJI} #{"emoji".pluralize(MAX_SMALL_EMOJI)}")
+    end
+
+    if dtext_body.embedded_media.count > MAX_IMAGES
+      errors.add(:base, "Can't include more than #{MAX_IMAGES} #{"image".pluralize(MAX_IMAGES)}")
+      return # don't check the actual images if the user included too many images
+    end
+
+    if dtext_body.embedded_posts.any? { _1.is_video? && _1.file_size > MAX_VIDEO_SIZE } || dtext_body.embedded_media_assets.any? { _1.is_video? && _1.file_size > MAX_VIDEO_SIZE }
+      errors.add(:base, "Can't include videos larger than #{MAX_VIDEO_SIZE.to_fs(:human_size)}")
+    end
+
+    if (embedded_post = dtext_body.embedded_posts.find { |embedded_post| embedded_post.rating_id > post.rating_id })
+      errors.add(:base, "Can't post a #{embedded_post.pretty_rating.downcase} image on a #{post.pretty_rating.downcase} post")
+    end
+
+    if (embedded_asset = dtext_body.embedded_media_assets.find { |embedded_asset| embedded_asset.ai_rating_id > post.rating_id })
+      errors.add(:base, "Can't post a #{embedded_asset.pretty_ai_rating.downcase} image on a #{post.pretty_rating.downcase} post")
+    end
+  end
+
   def autoreport_spam
     if SpamDetector.new(self, user_ip: creator_ip_addr).spam?
       moderation_reports << ModerationReport.new(creator: User.system, reason: "Spam.")
@@ -106,7 +143,7 @@ class Comment < ApplicationRecord
   end
 
   def quoted_response
-    DText.quote(body, creator.name)
+    DText.new(body).quote(creator.name)
   end
 
   def self.available_includes

@@ -63,8 +63,8 @@ class ArtistTest < ActiveSupport::TestCase
         @artist = FactoryBot.create(:artist, :name => "aaa")
         @post = FactoryBot.create(:post, :tag_string => "aaa")
         @admin = FactoryBot.create(:admin_user)
-        @artist.ban!(banner: @admin)
-        perform_enqueued_jobs
+        @artist.ban!(@admin)
+        perform_enqueued_jobs(only: ProcessBulkUpdateRequestJob)
         @post.reload
       end
 
@@ -72,15 +72,17 @@ class ArtistTest < ActiveSupport::TestCase
         assert_equal(true, @artist.reload.is_banned?)
         assert_equal(true, @post.reload.is_banned?)
         assert_equal(true, @artist.versions.last.is_banned?)
+        assert_equal(true, TagImplication.active.exists?(antecedent_name: @artist.name, consequent_name: "banned_artist"))
 
-        assert_difference("TagImplication.count", -1) do
-          @artist.unban!
-        end
+        @artist.unban!(@admin)
 
         assert_equal(false, @artist.reload.is_banned?)
         assert_equal(false, @post.reload.is_banned?)
         assert_equal(false, @artist.versions.last.is_banned?)
         assert_equal("aaa", @post.tag_string)
+        assert_equal(false, TagImplication.active.exists?(antecedent_name: @artist.name, consequent_name: "banned_artist"))
+        assert_equal(true, TagImplication.deleted.exists?(antecedent_name: @artist.name, consequent_name: "banned_artist"))
+        assert_equal(true, ModAction.artist_unban.exists?(subject: @artist))
       end
 
       should "ban the post" do
@@ -106,7 +108,17 @@ class ArtistTest < ActiveSupport::TestCase
       end
 
       should "update the artist history" do
+        assert_equal(true, @artist.reload.is_banned?)
         assert_equal(true, @artist.versions.last.is_banned?)
+      end
+
+      should "tag the posts" do
+        assert_equal(true, @post.reload.is_banned?)
+        assert_equal(true, @post.has_tag?("banned_artist"))
+      end
+
+      should "create a mod action" do
+        assert_equal(true, ModAction.artist_ban.exists?(subject: @artist))
       end
     end
 
@@ -300,7 +312,6 @@ class ArtistTest < ActiveSupport::TestCase
 
     context "when finding twitter artists" do
       setup do
-        skip "Twitter key is not set" unless Danbooru.config.twitter_api_key
         FactoryBot.create(:artist, :name => "hammer_(sunset_beach)", :url_string => "http://twitter.com/hamaororon")
         FactoryBot.create(:artist, :name => "haruyama_kazunori", :url_string => "https://twitter.com/kazuharoom")
       end
@@ -334,7 +345,7 @@ class ArtistTest < ActiveSupport::TestCase
 
     context "when finding pawoo artists" do
       setup do
-        skip "Pawoo keys not set" unless Danbooru.config.pawoo_client_id
+        skip "Pawoo keys not set" unless Danbooru.config.pawoo_access_token
         FactoryBot.create(:artist, :name => "evazion", :url_string => "https://pawoo.net/@evazion")
         FactoryBot.create(:artist, :name => "yasumo01", :url_string => "https://pawoo.net/web/accounts/28816")
       end
@@ -484,6 +495,13 @@ class ArtistTest < ActiveSupport::TestCase
       assert_search_equals([yuu, cat_or_fish], any_name_matches: "/cat/")
     end
 
+    should "search case-insensitively on any_name_matches" do
+      artist = create(:artist, name: "foo", other_names: ["BAR"])
+
+      assert_search_equals(artist, any_name_matches: "FOO")
+      assert_search_equals(artist, any_name_matches: "bar")
+    end
+
     should "search on url and return matches" do
       bkub = create(:artist, name: "bkub", url_string: "http://bkub.com")
 
@@ -491,6 +509,7 @@ class ArtistTest < ActiveSupport::TestCase
       assert_search_equals(bkub, url_matches: "*bkub*")
       assert_search_equals(bkub, url_matches: "/rifyu|bkub/")
       assert_search_equals(bkub, url_matches: "http://bkub.com/test.jpg")
+      assert_search_equals(bkub, url_matches: "http://bkub.com/test.jpg https://www.pixiv.net/users/9948")
     end
 
     should "search on has_tag and return matches" do

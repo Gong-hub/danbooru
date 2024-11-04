@@ -6,11 +6,11 @@
     <h1>Show Ban</h1>
     <ul style="margin-bottom: 1em;">
       <li><strong>User</strong> <%= link_to_user(@ban.user) %></li>
-      <li><strong>Duration</strong> <%= humanized_duration(@ban.duration) %></li>
+      <li><strong>Duration</strong> <%= @ban.humanized_duration %></li>
       <li>
         <strong>Reason</strong>
         <div class="prose">
-          <%= format_text @ban.reason %>
+          <%= @ban.dtext_reason.format_text %>
         </div>
       </li>
     </ul>

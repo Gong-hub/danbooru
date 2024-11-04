@@ -1,5 +1,6 @@
-<% page_title "#{@wiki_page.pretty_title.titleize} Wiki" %>
-<% meta_description DText.excerpt(@wiki_page.body) %>
+<% page_title "#{@wiki_page.pretty_title.startcase} Wiki" %>
+<% meta_description DText.new(@wiki_page.body).excerpt %>
+<% seo_canonical_url wiki_page_path(@wiki_page) %>
 
 <% if @wiki_page.artist.present? && @wiki_page.artist.is_banned? %>
   <% noindex %>
@@ -21,15 +22,19 @@
     <% end %>
   </h1>
 
-  <div id="wiki-page-body" class="prose">
-    <% if @wiki_page.other_names.present? %>
-      <p><%= wiki_page_other_names_list(@wiki_page) %></p>
-    <% end %>
+  <% if @wiki_page.other_names.present? %>
+    <%= wiki_page_other_names_list(@wiki_page) %>
+  <% end %>
 
+  <div id="wiki-page-body" class="prose">
     <% if @wiki_page.new_record? %>
-      <p>This wiki page does not exist. <%= link_to "Create new wiki page", new_wiki_page_path(wiki_page: { title: @wiki_page.title }), rel: "nofollow" %>.</p>
+      <p>This wiki page does not exist.
+        <% if policy(@wiki_page).create? %>
+          <%= link_to "Create new wiki page", new_wiki_page_path(wiki_page: { title: @wiki_page.title }), rel: "nofollow" %>.</p>
+        <% end %>
+      </p>
     <% else %>
-      <%= format_text(@wiki_page.body) %>
+      <%= @wiki_page.dtext_body.format_text %>
     <% end %>
 
     <% if @wiki_page.artist.present? && !@wiki_page.artist.is_deleted? %>
@@ -42,6 +47,8 @@
       <p class="fineprint">This tag is <%= link_to "deprecated", wiki_page_path("help:deprecation_notice") %> and can't be added to new posts.</p>
     <% end %>
   </div>
+
+  <%= render_tag_change_notice(tag: @wiki_page.tag, current_user: CurrentUser.user) %>
 
   <%= render "wiki_pages/posts", wiki_page: @wiki_page %>
 <% end %>

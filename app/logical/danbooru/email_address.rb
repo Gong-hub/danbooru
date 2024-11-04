@@ -12,7 +12,7 @@ module Danbooru
     class Error < StandardError; end
 
     # https://www.regular-expressions.info/email.html
-    EMAIL_REGEX = /\A[a-z0-9._+-]*[a-z0-9_+-]@(?:[a-z0-9][a-z0-9-]{0,61}\.)+[a-z]{2,}\z/i
+    EMAIL_REGEX = /^[a-zA-Z0-9._+-]*[a-zA-Z0-9_+-]@([a-zA-Z0-9][a-zA-Z0-9-]{0,61}\.)+[a-zA-Z]{2,}$/
 
     # Sites that ignore dots in email addresses, e.g. where `foo.bar@gmail.com` is the same as `foobar@gmail.com`.
     IGNORE_DOTS = %w[gmail.com]
@@ -315,6 +315,12 @@ module Danbooru
       parse(address)
     end
 
+    # @param address [String, Danbooru::EmailAddress] The address to canonicalize.
+    # @return [Danbooru::EmailAddress, nil] The email address converted to canonical form, e.g. "Foo.Bar+nospam@googlemail.com" => "foobar@gmail.com".
+    def self.canonicalize(address)
+      parse(address.to_s)&.canonicalized_address
+    end
+
     # Returns true if the string is a syntactically valid email address.
     #
     # @param address [String] The email address.
@@ -349,6 +355,9 @@ module Danbooru
           response = conn.rcptto(address) rescue $!
           return response.is_a?(Net::SMTPFatalError)
         end
+      rescue Errno::ECONNREFUSED
+        # nobody@yeah.com (MX: 0.0.0.0)
+        true
       rescue
         false
       end
@@ -409,7 +418,7 @@ module Danbooru
 
     # @return [String] The primary domain for the site, if the site has multiple domains, e.g. "googlemail.com" => "gmail.com".
     def canonical_domain
-      @canonical_domain ||= CANONICAL_DOMAINS.fetch(domain.to_s, domain.to_s)
+      @canonical_domain ||= CANONICAL_DOMAINS.fetch(domain.to_s.downcase, domain.to_s.downcase)
     end
 
     def as_json

@@ -58,7 +58,16 @@ class User < ApplicationRecord
 
   ACTIVE_BOOLEAN_ATTRIBUTES = BOOLEAN_ATTRIBUTES.grep_v(/unused/)
 
+  # Personal preferences that are editable by the user, rather than internal flags. These will be cleared when the user deactivates their account.
+  USER_PREFERENCE_BOOLEAN_ATTRIBUTES = ACTIVE_BOOLEAN_ATTRIBUTES - %w[is_banned requires_verification is_verified]
+
   DEFAULT_BLACKLIST = ["guro", "scat", "furry -rating:g"].join("\n")
+
+  # The number of backup codes to generate for a user.
+  MAX_BACKUP_CODES = 3
+
+  # The number of digits in each backup code.
+  BACKUP_CODE_LENGTH = 8
 
   attribute :id
   attribute :created_at
@@ -85,6 +94,7 @@ class User < ApplicationRecord
   attribute :theme, default: :auto
   attribute :upload_points, default: Danbooru.config.initial_upload_points.to_i
   attribute :bit_prefs, default: 0
+  attribute :is_deleted, default: false
 
   has_bit_flags BOOLEAN_ATTRIBUTES, :field => "bit_prefs"
   enum theme: { auto: 0, light: 50, dark: 100 }, _suffix: true
@@ -96,7 +106,7 @@ class User < ApplicationRecord
   validates :password, length: { minimum: 5 }, if: ->(rec) { rec.new_record? || rec.password.present? }
   validates :default_image_size, inclusion: { in: %w[large original] }
   validates :per_page, inclusion: { in: (1..PostSets::Post::MAX_PER_PAGE) }
-  validates :password, confirmation: true
+  validates :password, confirmation: { message: "Passwords don't match" }
   validates :comment_threshold, inclusion: { in: (-100..5) }
   validate  :validate_enable_private_favorites, on: :update
   validate  :validate_custom_css, if: :custom_style_changed?
@@ -121,6 +131,7 @@ class User < ApplicationRecord
   has_many :post_flags, foreign_key: :creator_id
   has_many :post_votes
   has_many :post_versions, foreign_key: :updater_id
+  has_many :post_reactions, -> { post }, class_name: "Reaction", foreign_key: :creator_id
   has_many :bans, -> {order("bans.id desc")}
   has_many :received_upgrades, class_name: "UserUpgrade", foreign_key: :recipient_id, dependent: :destroy
   has_many :purchased_upgrades, class_name: "UserUpgrade", foreign_key: :purchaser_id, dependent: :destroy
@@ -142,20 +153,19 @@ class User < ApplicationRecord
   has_many :uploads, foreign_key: :uploader_id, dependent: :destroy
   has_many :upload_media_assets, through: :uploads, dependent: :destroy
   has_many :mod_actions, as: :subject, dependent: :destroy
+  has_many :reactions, as: :model, dependent: :destroy
   belongs_to :inviter, class_name: "User", optional: true
 
   accepts_nested_attributes_for :email_address, reject_if: :all_blank, allow_destroy: true
 
-  # UserDeletion#rename renames deleted users to `user_<1234>~`. Tildes
-  # are appended if the username is taken.
-  scope :deleted, -> { where("name ~ 'user_[0-9]+~*'") }
-  scope :undeleted, -> { where("name !~ 'user_[0-9]+~*'") }
   scope :admins, -> { where(level: Levels::ADMIN) }
   scope :banned, -> { bit_prefs_match(:is_banned, true) }
 
   scope :has_blacklisted_tag, ->(name) { where_regex(:blacklisted_tags, "(^| )[~-]?#{Regexp.escape(name)}( |$)", flags: "ni") }
   scope :has_private_favorites, -> { bit_prefs_match(:enable_private_favorites, true) }
   scope :has_public_favorites,  -> { bit_prefs_match(:enable_private_favorites, false) }
+
+  deletable
 
   module BanMethods
     def unban!
@@ -174,10 +184,34 @@ class User < ApplicationRecord
         find_by_name(name).try(:id)
       end
 
-      # XXX should casefold instead of lowercasing.
-      # XXX using lower(name) instead of ilike so we can use the index.
+      # Find the user who is currently using this name, or if nobody is, find the user(s) that have used this name in the past.
+      def name_or_past_name_matches(name, current_user:)
+        users = name_matches(name).load
+
+        if users.one?
+          users
+        else
+          past_name_matches(name, current_user:)
+        end
+      end
+
+      # Find all users that have ever used this name, past or present.
+      def any_name_matches(name, current_user:)
+        # A UNION is faster than an OR for this query because the OR results in a full table scan.
+        # name_matches(name).or(past_name_matches(name, current_user:))
+        where_union(name_matches(name), past_name_matches(name, current_user:))
+      end
+
       def name_matches(name)
-        where("lower(name) = ?", normalize_name(name)).limit(1)
+        where("lower(name) = ?", normalize_name(name))
+      end
+
+      def past_name_matches(name, current_user:)
+        where(id: UserNameChangeRequest.visible(current_user).where_iequals(:original_name, normalize_name(name)).select(:user_id))
+      end
+
+      def find_by_name_or_email(name_or_email)
+        find_by_name(name_or_email) || find_by_email(name_or_email)
       end
 
       def find_by_name(name)
@@ -202,10 +236,7 @@ class User < ApplicationRecord
     end
 
     def name_errors
-      User.validators_on(:name).each do |validator|
-        validator.validate_each(self, :name, name)
-      end
-
+      UserNameValidator.new(attributes: [:name], skip_uniqueness: true).validate(self)
       errors
     end
 
@@ -214,27 +245,151 @@ class User < ApplicationRecord
     end
   end
 
-  concerning :AuthenticationMethods do
+  concerning :PasswordMethods do
     def password=(new_password)
       @password = new_password
       self.bcrypt_password_hash = BCrypt::Password.create(hash_password(new_password))
     end
 
-    def authenticate_login_key(signed_user_id)
-      signed_user_id.present? && id == Danbooru::MessageVerifier.new(:login).verify(signed_user_id) && self
+    def request_password_reset!(request)
+      with_lock do
+        if can_receive_email?(require_verified_email: false)
+          UserMailer.with_request(request).password_reset(self).deliver_later
+        end
+
+        UserEvent.create_from_request!(self, :password_reset_request, request)
+      end
     end
 
+    def reset_password(new_password:, password_confirmation:, verification_code:, request:)
+      if is_deleted?
+        errors.add(:base, "You can't reset the password of a deleted account")
+        false
+      elsif totp.present? && !totp.verify(verification_code) && !has_backup_code?(verification_code)
+        UserEvent.create_from_request!(self, :totp_failed_reauthenticate, request)
+        errors.add(:verification_code, "is incorrect")
+        false
+      else
+        with_lock do
+          UserEvent.build_from_request(self, :password_reset, request)
+          success = update(password: new_password, password_confirmation: password_confirmation)
+          verify_backup_code!(verification_code) if success
+          success
+        end
+      end
+    end
+
+    def change_password(current_user:, current_password:, new_password:, password_confirmation:, verification_code:, request:)
+      if self != current_user && PasswordPolicy.new(current_user, self).can_change_user_passwords?
+        UserEvent.build_from_request(self, :password_change, request)
+        update(password: new_password, password_confirmation: password_confirmation)
+      elsif !authenticate_password(current_password)
+        UserEvent.create_from_request!(self, :failed_reauthenticate, request)
+        errors.add(:current_password, "is incorrect")
+        false
+      elsif totp.present? && !totp.verify(verification_code)
+        UserEvent.create_from_request!(self, :totp_failed_reauthenticate, request)
+        errors.add(:verification_code, "is incorrect")
+        false
+      else
+        UserEvent.build_from_request(self, :password_change, request)
+        update(password: new_password, password_confirmation: password_confirmation)
+      end
+    end
+  end
+
+  concerning :AuthenticationMethods do
+    # @return [Array<(User, ApiKey)>, Boolean] Return a (User, ApiKey) pair if the API key is correct, or false if it isn't.
     def authenticate_api_key(key)
+      return false if is_deleted?
       api_key = api_keys.find_by(key: key)
       api_key.present? && ActiveSupport::SecurityUtils.secure_compare(api_key.key, key) && [self, api_key]
     end
 
+    # @return [User, Boolean] Return the user if the password is correct, or false if it isn't.
     def authenticate_password(password)
+      return false if is_deleted?
       BCrypt::Password.new(bcrypt_password_hash) == hash_password(password) && self
     end
 
     def hash_password(password)
       Digest::SHA1.hexdigest("choujin-steiner--#{password}--")
+    end
+  end
+
+  concerning :TOTPMethods do
+    extend Memoist
+
+    # @return [TOTP, nil] Return a 2FA code verifier if the user has 2FA enabled, or nil if 2FA is not enabled.
+    memoize def totp
+      TOTP.new(totp_secret, username: name) if totp_secret.present?
+    end
+
+    # Add a secret to enable 2FA, or delete it to disable 2FA, or change it to use new 2FA codes.
+    #
+    # @param secret [String] The 16-character base-32 encoded secret.
+    # @param request [ActionDispatch::Request] The HTTP request.
+    def update_totp_secret!(secret, request:)
+      with_lock do
+        update!(totp_secret: secret)
+        flush_cache # clear memoized totp
+
+        if totp_secret_before_last_save.nil?
+          UserEvent.create_from_request!(self, :totp_enable, request)
+          generate_backup_codes!(request)
+        elsif secret.nil?
+          UserEvent.create_from_request!(self, :totp_disable, request)
+          update!(backup_codes: nil)
+        else
+          UserEvent.create_from_request!(self, :totp_update, request)
+        end
+      end
+    end
+  end
+
+  concerning :BackupCodeMethods do
+    # Check whether the given backup code is correct. If it is, remove it and generate a new backup code.
+    #
+    # @param backup_code [String] The backup code to verify.
+    def verify_backup_code!(backup_code)
+      if has_backup_code?(backup_code)
+        replace_backup_code!(backup_code)
+        true
+      else
+        false
+      end
+    end
+
+    # Return true if the given backup code is correct.
+    def has_backup_code?(backup_code)
+      return false unless backup_code.to_s.strip.match?(/\A[0-9]+\z/)
+      backup_codes.include?(backup_code.to_s.strip.to_i)
+    end
+
+    # Replace the given backup code with a new one.
+    def replace_backup_code!(backup_code)
+      with_lock do
+        return unless has_backup_code?(backup_code)
+        backup_code = backup_code.strip.to_i
+        new_backup_codes = backup_codes.without(backup_code) + [generate_backup_code]
+        update!(backup_codes: new_backup_codes)
+      end
+    end
+
+    # Generate a new set of backup codes.
+    #
+    # @param request [ActionDispatch::Request] The HTTP request.
+    # @param max_codes [Integer] The number of backup codes to generate.
+    # @param length [Integer] The number of digits in each backup code.
+    def generate_backup_codes!(request, max_codes: MAX_BACKUP_CODES, length: BACKUP_CODE_LENGTH)
+      with_lock do
+        update!(backup_codes: max_codes.times.map { generate_backup_code(length) })
+        UserEvent.create_from_request!(self, :backup_code_generate, request)
+      end
+    end
+
+    def generate_backup_code(length = BACKUP_CODE_LENGTH)
+      SecureRandom.rand(10**length)
     end
   end
 
@@ -296,10 +451,6 @@ class User < ApplicationRecord
       User.level_string(value || level)
     end
 
-    def is_deleted?
-      name.match?(/\Auser_[0-9]+~*\z/)
-    end
-
     def is_anonymous?
       level == Levels::ANONYMOUS
     end
@@ -345,7 +496,15 @@ class User < ApplicationRecord
     end
   end
 
-  module EmailMethods
+  concerning :EmailMethods do
+    class_methods do
+      # @param email_address [String] The user's email address.
+      def find_by_email(email_address)
+        normalized_address = Danbooru::EmailAddress.canonicalize(email_address).to_s
+        User.joins(:email_address).find_by(email_address: { normalized_address: normalized_address })
+      end
+    end
+
     def can_receive_email?(require_verified_email: true)
       email_address.present? && email_address.is_deliverable? && (email_address.is_verified? || !require_verified_email)
     end
@@ -366,9 +525,10 @@ class User < ApplicationRecord
     class_methods do
       def rewrite_blacklists!(old_name, new_name)
         has_blacklisted_tag(old_name).find_each do |user|
-          user.lock!
-          user.rewrite_blacklist(old_name, new_name)
-          user.save!
+          user.with_lock do
+            user.rewrite_blacklist(old_name, new_name)
+            user.save!
+          end
         end
       end
     end
@@ -469,14 +629,9 @@ class User < ApplicationRecord
       post_flags.active.count >= 5
     end
 
-    # Flags are unlimited if you're an approver or you have at least 30 flags
-    # in the last 3 months and have a 70% flag success rate.
+    # Flags are unlimited if you're an approver.
     def has_unlimited_flags?
       return true if is_approver?
-
-      recent_flags = post_flags.where("created_at >= ?", 3.months.ago)
-      flag_ratio = recent_flags.succeeded.count / recent_flags.count.to_f
-      recent_flags.count >= 30 && flag_ratio >= 0.70
     end
 
     def upload_limit
@@ -597,17 +752,23 @@ class User < ApplicationRecord
 
       q = search_attributes(
         params,
-        [:id, :created_at, :updated_at, :name, :level, :post_upload_count,
-        :post_update_count, :note_update_count, :favorite_count, :posts,
-        :note_versions, :artist_commentary_versions, :post_appeals,
-        :post_approvals, :artist_versions, :comments, :wiki_page_versions,
-        :feedback, :forum_topics, :forum_posts, :forum_post_votes,
-        :tag_aliases, :tag_implications, :bans, :inviter],
+        [:id, :created_at, :updated_at, :name, :level, :is_deleted, :post_upload_count, :post_update_count,
+         :note_update_count, :favorite_count, :posts, :note_versions, :artist_commentary_versions, :post_appeals,
+         :post_approvals, :artist_versions, :comments, :wiki_page_versions, :feedback, :forum_topics, :forum_posts,
+         :forum_post_votes, :tag_aliases, :tag_implications, :bans, :inviter],
         current_user: current_user
       )
 
       if params[:name_matches].present?
         q = q.where_ilike(:name, normalize_name(params[:name_matches]))
+      end
+
+      if params[:any_name_matches].present?
+        q = q.any_name_matches(params[:any_name_matches], current_user:)
+      end
+
+      if params[:name_or_past_name_matches].present?
+        q = q.name_or_past_name_matches(params[:name_or_past_name_matches], current_user:)
       end
 
       if params[:min_level].present?
@@ -649,7 +810,6 @@ class User < ApplicationRecord
 
   include BanMethods
   include LevelMethods
-  include EmailMethods
   include ForumMethods
   include ApiMethods
   extend SearchMethods
@@ -664,6 +824,11 @@ class User < ApplicationRecord
 
   def dtext_shortlink(**options)
     "<@#{name}>"
+  end
+
+  def reload(...)
+    flush_cache # flush memoize cache
+    super
   end
 
   def self.available_includes

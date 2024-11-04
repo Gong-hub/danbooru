@@ -212,7 +212,7 @@ class BulkUpdateRequestProcessor
 
         when :change_category
           tag = Tag.find_or_create_by_name(args[0])
-          tag.update!(category: Tag.categories.value_for(args[1]), updater: User.system)
+          tag.update!(category: Tag.categories.value_for(args[1]), updater: User.system, is_bulk_update_request: true)
 
         when :deprecate
           tag = Tag.find_or_create_by_name(args[0])
@@ -307,7 +307,7 @@ class BulkUpdateRequestProcessor
 
   def self.mass_update(antecedent, consequent, user: User.system)
     CurrentUser.scoped(user) do
-      Post.anon_tag_match(antecedent).reorder(nil).parallel_each do |post|
+      Post.anon_tag_match(antecedent).reorder(nil).parallel_find_each do |post|
         post.with_lock do
           post.tag_string += " " + consequent
           post.save

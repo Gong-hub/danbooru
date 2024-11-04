@@ -4,7 +4,7 @@ module Sources
   class MastodonTest < ActiveSupport::TestCase
     context "For Pawoo," do
       setup do
-        skip "Pawoo keys not set" unless Danbooru.config.pawoo_client_id
+        skip "Pawoo keys not set" unless Danbooru.config.pawoo_access_token
       end
 
       context "a https://pawoo.net/web/status/$id url" do
@@ -12,8 +12,10 @@ module Sources
           "https://pawoo.net/web/statuses/1202176",
           image_urls: ["https://img.pawoo.net/media_attachments/files/000/128/953/original/4c0a06087b03343f.png"],
           profile_url: "https://pawoo.net/@9ed00e924818",
-          artist_name: "9ed00e924818",
-          dtext_artist_commentary_desc: "a mind forever voyaging through strange seas of thought alone"
+          username: "9ed00e924818",
+          display_name: nil,
+          dtext_artist_commentary_desc: "a mind forever voyaging through strange seas of thought alone",
+          media_files: [{ file_size: 7_680 }],
         )
       end
 
@@ -37,7 +39,8 @@ module Sources
             https://img.pawoo.net/media_attachments/files/001/298/084/original/media.mp4
           ],
           profile_urls: %w[https://pawoo.net/@evazion https://pawoo.net/web/accounts/47806],
-          artist_name: "evazion",
+          username: "evazion",
+          display_name: nil,
           tags: %w[foo bar baz],
           dtext_artist_commentary_desc: desc
         )
@@ -47,7 +50,7 @@ module Sources
         strategy_should_work(
           "https://img.pawoo.net/media_attachments/files/001/298/028/original/55a6fd252778454b.mp4",
           image_urls: ["https://img.pawoo.net/media_attachments/files/001/298/028/original/55a6fd252778454b.mp4"],
-          download_size: 59_950,
+          media_files: [{ file_size: 59_950 }],
           referer: "https://pawoo.net/@evazion/19451018",
           page_url: "https://pawoo.net/@evazion/19451018"
         )
@@ -57,7 +60,7 @@ module Sources
         strategy_should_work(
           "https://pawoo.net/@nonamethankswashere/12345678901234567890",
           profile_url: "https://pawoo.net/@nonamethankswashere",
-          artist_name: "nonamethankswashere",
+          username: "nonamethankswashere",
           deleted: true
         )
       end
@@ -65,25 +68,34 @@ module Sources
 
     context "For Baraag," do
       setup do
-        skip "Baraag keys not set" unless Danbooru.config.baraag_client_id
+        skip "Baraag keys not set" unless Danbooru.config.baraag_access_token
       end
 
       context "a baraag.net/$user/$id url" do
         strategy_should_work(
           "https://baraag.net/@bardbot/105732813175612920",
-          image_urls: ["https://baraag.net/system/media_attachments/files/105/732/803/241/495/700/original/556e1eb7f5ca610f.png"],
-          download_size: 573_353,
+          image_urls: ["https://media.baraag.net/media_attachments/files/105/732/803/241/495/700/original/556e1eb7f5ca610f.png"],
+          media_files: [{ file_size: 573_353 }],
           profile_url: "https://baraag.net/@bardbot",
-          artist_name: "bardbot",
+          username: "bardbot",
+          display_name: "SpicyBardo🔞",
           dtext_artist_commentary_desc: "🍌"
         )
       end
 
-      context "a baraag image url" do
+      context "an old baraag image url" do
         strategy_should_work(
           "https://baraag.net/system/media_attachments/files/105/803/948/862/719/091/original/54e1cb7ca33ec449.png",
-          image_urls: ["https://baraag.net/system/media_attachments/files/105/803/948/862/719/091/original/54e1cb7ca33ec449.png"],
-          download_size: 363_261
+          image_urls: ["https://media.baraag.net/media_attachments/files/105/803/948/862/719/091/original/54e1cb7ca33ec449.png"],
+          media_files: [{ file_size: 363_261 }]
+        )
+      end
+
+      context "a new baraag image url" do
+        strategy_should_work(
+          "https://media.baraag.net/media_attachments/files/105/803/948/862/719/091/original/54e1cb7ca33ec449.png",
+          image_urls: ["https://media.baraag.net/media_attachments/files/105/803/948/862/719/091/original/54e1cb7ca33ec449.png"],
+          media_files: [{ file_size: 363_261 }]
         )
       end
 
@@ -91,7 +103,7 @@ module Sources
         strategy_should_work(
           "https://baraag.net/@nonamethankswashere/12345678901234567890",
           profile_url: "https://baraag.net/@nonamethankswashere",
-          artist_name: "nonamethankswashere",
+          username: "nonamethankswashere",
           deleted: true
         )
       end
@@ -107,7 +119,7 @@ module Sources
       should "handle inconvertible urls" do
         assert_nil(Source::URL.page_url("https://img.pawoo.net/media_attachments/files/001/297/997/original/c4272a09570757c2.png"))
         assert_nil(Source::URL.page_url("https://pawoo.net/@evazion/media"))
-        assert_nil(Source::URL.page_url("https://baraag.net/system/media_attachments/files/105/732/803/241/495/700/original/556e1eb7f5ca610f.png"))
+        assert_nil(Source::URL.page_url("https://media.baraag.net/media_attachments/files/105/732/803/241/495/700/original/556e1eb7f5ca610f.png"))
       end
     end
 
@@ -125,11 +137,13 @@ module Sources
 
     should "Parse Baraag URLs correctly" do
       assert(Source::URL.image_url?("https://baraag.net/system/media_attachments/files/107/866/084/749/942/932/original/a9e0f553e332f303.mp4"))
+      assert(Source::URL.image_url?("https://media.baraag.net/media_attachments/files/107/866/084/749/942/932/original/a9e0f553e332f303.mp4"))
 
       assert(Source::URL.page_url?("https://baraag.net/@curator/102270656480174153"))
       assert(Source::URL.page_url?("https://baraag.net/web/statuses/102270656480174153"))
 
       assert(Source::URL.profile_url?("https://baraag.net/@danbooru"))
+      assert(Source::URL.profile_url?("https://baraag.net/@web/danbooru"))
       assert(Source::URL.profile_url?("https://baraag.net/web/accounts/107862785324786980"))
     end
   end

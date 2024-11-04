@@ -20,17 +20,20 @@ class AITagsController < ApplicationController
     @ai_tag = authorize AITag.find_by!(media_asset_id: params[:media_asset_id], tag_id: params[:tag_id])
     @post = @ai_tag.post
 
-    if params[:mode] == "remove"
+    if params[:tag].present?
+      @post.add_tag(params[:tag])
+      flash.now[:notice] = DText.new("Post ##{@post.id}: Reverted to [[#{params[:tag]}]].", inline: true).format_text
+    elsif params[:mode] == "remove"
       @post.remove_tag(@ai_tag.tag.name)
-      flash.now[:notice] = DText.format_text("Post ##{@post.id}: Removed [[#{@ai_tag.tag.pretty_name}]].", inline: true).html_safe
+      flash.now[:notice] = DText.new("Post ##{@post.id}: Removed [[#{@ai_tag.tag.pretty_name}]].", inline: true).format_text
     else
       @post.add_tag(@ai_tag.tag.name)
-      flash.now[:notice] = DText.format_text("Post ##{@post.id}: Added [[#{@ai_tag.tag.pretty_name}]].", inline: true).html_safe
+      flash.now[:notice] = DText.new("Post ##{@post.id}: Added [[#{@ai_tag.tag.pretty_name}]].", inline: true).format_text
     end
 
     @post.save
     if @post.invalid?
-      flash.now[:notice] = DText.format_text("Couldn't update post ##{@post.id}: #{@post.errors.full_messages.join("; ")}", inline: true).html_safe
+      flash.now[:notice] = DText.new("Couldn't update post ##{@post.id}: #{@post.errors.full_messages.join("; ")}", inline: true).format_text
     end
 
     @preview_size = params[:size].presence || cookies[:post_preview_size].presence || PostGalleryComponent::DEFAULT_SIZE

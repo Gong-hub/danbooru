@@ -24,6 +24,20 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
       assert_response 200
     end
 
+    should "return 404 Not Found for an unsupported method on the root path" do
+      post root_path
+      assert_response 404
+
+      put root_path
+      assert_response 404
+
+      patch root_path
+      assert_response 404
+
+      delete root_path
+      assert_response 404
+    end
+
     context "on a RecordNotFound error" do
       should "return 404 Not Found even with a bad file extension" do
         get post_path("bad.json")
@@ -137,6 +151,14 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
           assert_response 401
         end
 
+        should "fail for a deleted user" do
+          @user.update!(is_deleted: true)
+          basic_auth_string = "Basic #{::Base64.encode64("#{@user.name}:#{@api_key.key}")}"
+          get profile_path, as: :json, headers: { HTTP_AUTHORIZATION: basic_auth_string }
+
+          assert_response 401
+        end
+
         should "succeed for non-GET requests without a CSRF token" do
           assert_changes -> { @user.reload.enable_safe_mode }, from: false, to: true do
             basic_auth_string = "Basic #{::Base64.encode64("#{@user.name}:#{@api_key.key}")}"
@@ -180,6 +202,13 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
           assert_response 401
 
           get profile_path(api_key: ""), as: :json
+          assert_response 401
+        end
+
+        should "fail for a deleted user" do
+          @user.update!(is_deleted: true)
+          get edit_user_path(@user), params: { login: @user.name, api_key: @api_key.key }
+
           assert_response 401
         end
 
@@ -254,8 +283,8 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
           token = css_select("form input[name=authenticity_token]").first["value"]
 
           # login
-          post session_path, params: { authenticity_token: token, name: @user.name, password: "password" }
-          assert_redirected_to posts_path
+          post session_path, params: { authenticity_token: token, session: { name: @user.name, password: "password" } }
+          assert_redirected_to root_path
 
           # try to submit a form with cookies but without the csrf token
           put user_path(@user), headers: { HTTP_COOKIE: headers["Set-Cookie"] }, params: { user: { enable_safe_mode: "true" } }
@@ -267,13 +296,25 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
     end
 
     context "on session cookie authentication" do
-      should "succeed" do
-        user = create(:user, password: "password")
+      setup do
+        @user = create(:user, password: "password")
+        login_as(@user)
+      end
 
-        post session_path, params: { name: user.name, password: "password" }
-        get edit_user_path(user)
+      should "succeed" do
+        get profile_path
 
         assert_response :success
+      end
+
+      should "fail for a deleted user" do
+        @user.update!(is_deleted: true)
+
+        get profile_path
+
+        assert_redirected_to login_path(url: "/profile")
+        assert_nil(session[:user_id])
+        assert_equal(true, @user.user_events.exists?(category: :logout))
       end
     end
 
@@ -298,6 +339,7 @@ class ApplicationControllerTest < ActionDispatch::IntegrationTest
       should "fail with a 429 error" do
         user = create(:user)
         post = create(:post, rating: "s")
+        Danbooru.config.stubs(:rate_limits_enabled?).returns(true)
         RateLimit.any_instance.stubs(:limited?).returns(true)
 
         put_auth post_path(post), user, params: { post: { rating: "e" } }

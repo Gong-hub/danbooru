@@ -4,12 +4,8 @@
 module Source
   class Extractor
     class Moebooru < Source::Extractor
-      delegate :artist_name, :profile_url, :tag_name, :artist_commentary_title, :artist_commentary_desc, :dtext_artist_commentary_title, :dtext_artist_commentary_desc, to: :sub_extractor, allow_nil: true
+      delegate :artist_name, :profile_url, :display_name, :username, :tag_name, :artist_commentary_title, :artist_commentary_desc, :dtext_artist_commentary_title, :dtext_artist_commentary_desc, to: :sub_extractor, allow_nil: true
       delegate :site_name, :domain, to: :parsed_url
-
-      def match?
-        Source::URL::Moebooru === parsed_url
-      end
 
       def image_urls
         return [] if post_md5.blank? || file_ext.blank?
@@ -23,7 +19,7 @@ module Source
 
       def tags
         api_response[:tags].to_s.split.map do |tag|
-          [tag, "https://#{domain}/post?tags=#{CGI.escape(tag)}"]
+          [tag, "https://#{domain}/post?tags=#{Danbooru::URL.escape(tag)}"]
         end
       end
 
@@ -34,7 +30,7 @@ module Source
 
       # Moebooru returns an empty array when doing an md5:<hash> search for a
       # deleted post. Because of this, api_response may be empty in some cases.
-      def api_response
+      memoize def api_response
         if post_id_from_url.present?
           params = { tags: "id:#{post_id_from_url}" }
         elsif post_md5_from_url.present?
@@ -43,15 +39,19 @@ module Source
           return {}
         end
 
-        response = http.cache(1.minute).get("https://#{domain}/post.json", params: params)
-        post = response.parse.first&.with_indifferent_access
-        post || {}
+        http.cache(1.minute).parsed_get("https://#{domain}/post.json", params: params)&.first&.with_indifferent_access || {}
       end
-      memoize :api_response
+
+      def http_downloader
+        # Yande.re redirects image URLs to the HTML page if we spoof the referer.
+        super.disable_feature(:spoof_referrer)
+      end
 
       concerning :HelperMethods do
         def sub_extractor
-          @sub_extractor ||= Source::Extractor.find(api_response[:source], default: nil)
+          return nil if parent_extractor.present?
+
+          @sub_extractor ||= Source::Extractor.find(api_response[:source], default_extractor: nil, parent_extractor: self)
         end
 
         def file_ext

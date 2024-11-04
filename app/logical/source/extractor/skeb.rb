@@ -4,10 +4,6 @@
 module Source
   class Extractor
     class Skeb < Extractor
-      def match?
-        Source::URL::Skeb === parsed_url
-      end
-
       def image_urls
         if parsed_url.image_url?
           [url]
@@ -44,49 +40,45 @@ module Source
       end
 
       def page_url
-        return unless artist_name.present? && illust_id.present?
-        "https://skeb.jp/@#{artist_name}/works/#{illust_id}"
+        if api_response[:path].present?
+          # https://skeb.jp/@kotora_hu/works/1
+          "https://skeb.jp#{api_response[:path]}"
+        else
+          parsed_url.page_url || parsed_referer&.page_url
+        end
       end
 
       def api_url
-        return nil unless artist_name.present? && illust_id.present?
-        "https://skeb.jp/api/users/#{artist_name}/works/#{illust_id}"
+        parsed_url.api_url || parsed_referer&.api_url
       end
 
-      def api_response
+      memoize def api_response
         return {} unless api_url.present?
 
-        headers = {
-          Referer: profile_url,
-          Authorization: "Bearer null",
-        }
+        response = http.cache(1.minute).get(api_url)
 
-        response = http.cache(1.minute).headers(headers).get(api_url)
-        return {} unless response.status == 200
-        # The status check is required for private commissions, which return 404
-
+        return {} if response.mime_type == "text/html"
         response.parse
       end
 
-      def profile_url
-        return nil if artist_name.blank?
-        "https://skeb.jp/@#{artist_name}"
+      def http
+        super.headers(
+          Authorization: "Bearer null",
+          "sec-fetch-mode": "cors",
+          "sec-fetch-site": "same-origin",
+        )
       end
 
-      def artist_name
-        parsed_url.username || parsed_referer&.username
+      def profile_url
+        "https://skeb.jp/@#{username}" if username.present?
       end
 
       def display_name
         api_response&.dig("creator", "name")
       end
 
-      def illust_id
-        parsed_url.work_id || parsed_referer&.work_id
-      end
-
-      def other_names
-        [display_name].compact.uniq
+      def username
+        Source::URL.parse(page_url)&.username
       end
 
       def artist_commentary_desc
@@ -100,13 +92,19 @@ module Source
 
       def dtext_artist_commentary_desc
         if client_response.present? && artist_commentary_desc.present?
-          "h6. Original Request:\n\n#{artist_commentary_desc}\n\nh6. Client Response:\n\n#{client_response}"
+          <<~EOS.chomp
+            h6. Original Request
+
+            #{DText.from_plaintext(artist_commentary_desc)}
+
+            h6. Client Response
+
+            #{DText.from_plaintext(client_response)}
+          EOS
         else
-          artist_commentary_desc
+          DText.from_plaintext(artist_commentary_desc)
         end
       end
-
-      memoize :api_response
     end
   end
 end

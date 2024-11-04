@@ -3,7 +3,10 @@
 class Ban < ApplicationRecord
   attribute :duration, :interval
 
+  dtext_attribute :reason, inline: true # defines :dtext_reason
+
   after_create :create_feedback
+  after_create :create_dmail
   after_create :update_user_on_create
   after_create :create_ban_mod_action
   after_destroy :update_user_on_destroy
@@ -11,7 +14,9 @@ class Ban < ApplicationRecord
   belongs_to :user
   belongs_to :banner, :class_name => "User"
 
-  validates :reason, presence: true
+  validates :duration, presence: true
+  validates :duration, inclusion: { in: [1.day, 3.days, 1.week, 1.month, 3.months, 6.months, 1.year, 100.years], message: "%{value} is not a valid ban duration" }, if: :duration_changed?
+  validates :reason, visible_string: true
   validate :user, :validate_user_is_bannable, on: :create
 
   scope :unexpired, -> { where("bans.created_at + bans.duration > ?", Time.zone.now) }
@@ -65,7 +70,21 @@ class Ban < ApplicationRecord
   end
 
   def humanized_duration
-    ApplicationController.helpers.humanized_duration(duration)
+    if forever?
+      "forever"
+    elsif duration < 0
+      # In production, the oldest bans have negative duration because in 2013 the database was migrated and the
+      # created_at field was reset to 2013, which made their creation date come after their expiration date.
+      "unknown"
+    elsif duration < 1.month
+      duration.in_days.round.days.inspect
+    elsif duration < 1.year
+      duration.in_months.round.months.inspect
+    elsif duration < 100.years
+      duration.in_years.round.years.inspect
+    else
+      duration.inspect
+    end
   end
 
   def forever?
@@ -77,7 +96,11 @@ class Ban < ApplicationRecord
   end
 
   def create_feedback
-    user.feedback.create!(creator: banner, category: "negative", body: "Banned #{humanized_duration}: #{reason}")
+    user.feedback.create!(creator: banner, category: "negative", body: "Banned #{humanized_duration}: #{reason}", disable_dmail_notification: true)
+  end
+
+  def create_dmail
+    Dmail.create_automated(to: user, title: "You have been banned", body: "You have been banned #{forever? ? "forever" : "for #{humanized_duration}"}: #{reason}")
   end
 
   def create_ban_mod_action

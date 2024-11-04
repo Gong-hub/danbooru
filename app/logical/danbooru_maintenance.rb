@@ -7,11 +7,12 @@ module DanbooruMaintenance
     queue PrunePostsJob
     queue PruneRateLimitsJob
     queue RegeneratePostCountsJob
+    queue PruneUploadsJob
+    queue PruneJobsJob
     #queue AmcheckDatabaseJob
   end
 
   def daily
-    queue PruneJobsJob
     queue PrunePostDisapprovalsJob
     queue PruneBulkUpdateRequestsJob
     queue PruneBansJob
@@ -29,7 +30,7 @@ module DanbooruMaintenance
   end
 
   def queue(job)
-    Rails.logger.level = :info
+    Rails.logger.level = :info if Rails.env.production?
     DanbooruLogger.info("Queueing #{job.name}")
     ApplicationRecord.connection.verify!
     job.perform_later

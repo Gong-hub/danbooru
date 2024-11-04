@@ -31,13 +31,13 @@
         </tr>
       <% end %>
 
-      <% if policy(UserEvent).show? %>
+      <% if policy(UserEvent).can_see_events_by_others? %>
         <tr>
           <th>User Events</th>
           <td>
             <% if user.last_ip_addr.present? %>
               <%= link_to "By Name", user_events_path(search: { user_name: user.name }) %>,
-              <%= link_to "By IP", user_events_path(search: { user_session: { ip_addr: user.last_ip_addr }}) %>
+              <%= link_to "By IP", user_events_path(search: { ip_addr: user.last_ip_addr }) %>
             <% else %>
               <%= link_to "By Name", user_events_path(search: { user_name: user.name }) %>
             <% end %>
@@ -99,8 +99,8 @@
           <th>Ban reason</th>
           <td>
             <span class="prose">
-              <%= format_text user.active_ban.reason, inline: true %>
-              (banned <%= humanized_duration(user.active_ban.duration) %>)
+              <%= user.active_ban.dtext_reason.format_text %>
+              (banned <%= user.active_ban.humanized_duration %>)
             </span>
           </td>
         </tr>

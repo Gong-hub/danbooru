@@ -28,7 +28,7 @@ class ForumPostsControllerTest < ActionDispatch::IntegrationTest
       should "render existing votes" do
         get_auth forum_topic_path(@forum_topic), @mod
         assert_response :success
-        assert_select "li.vote-score-up"
+        assert_select ".vote-score-up"
       end
 
       context "after the BUR is rejected" do
@@ -45,7 +45,7 @@ class ForumPostsControllerTest < ActionDispatch::IntegrationTest
         end
 
         should "still render existing votes" do
-          assert_select "li.vote-score-up"
+          assert_select ".vote-score-up"
           assert_response :success
         end
       end
@@ -228,9 +228,10 @@ class ForumPostsControllerTest < ActionDispatch::IntegrationTest
 
         assert_redirected_to(@forum_reply)
         assert_equal(true, @forum_reply.reload.is_deleted?)
-        assert_match(/updated forum ##{@forum_reply.id}/, ModAction.last.description)
+        assert_match(/deleted forum ##{@forum_reply.id}/, ModAction.last.description)
         assert_equal(@forum_reply, ModAction.last.subject)
         assert_equal(@mod, ModAction.last.creator)
+        assert_equal("forum_post_delete", ModAction.last.category)
       end
 
       should "not allow users to delete their own posts" do
@@ -272,6 +273,7 @@ class ForumPostsControllerTest < ActionDispatch::IntegrationTest
         assert_match(/updated forum ##{@forum_reply.id}/, ModAction.last.description)
         assert_equal(@forum_reply, ModAction.last.subject)
         assert_equal(@mod, ModAction.last.creator)
+        assert_equal("forum_post_update", ModAction.last.category)
       end
 
       should "not allow users to undelete their own posts" do

@@ -66,6 +66,28 @@ COMMENT ON EXTENSION pgstattuple IS 'show tuple-level statistics';
 
 
 --
+-- Name: array_initials(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.array_initials(text[]) RETURNS text
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $_$
+  SELECT string_agg(left(string, 1), '' ORDER BY ordinality) FROM unnest($1) WITH ORDINALITY AS string;
+$_$;
+
+
+--
+-- Name: lower(text[]); Type: FUNCTION; Schema: public; Owner: -
+--
+
+CREATE FUNCTION public.lower(text[]) RETURNS text[]
+    LANGUAGE sql IMMUTABLE PARALLEL SAFE
+    AS $_$
+  SELECT array_agg(lower(value)) FROM unnest($1) value;
+$_$;
+
+
+--
 -- Name: reverse_textregexeq(text, text); Type: FUNCTION; Schema: public; Owner: -
 --
 
@@ -797,14 +819,57 @@ ALTER SEQUENCE public.forum_topics_id_seq OWNED BY public.forum_topics.id;
 
 
 --
+-- Name: good_job_batches; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.good_job_batches (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL,
+    description text,
+    serialized_properties jsonb,
+    on_finish text,
+    on_success text,
+    on_discard text,
+    callback_queue_name text,
+    callback_priority integer,
+    enqueued_at timestamp(6) without time zone,
+    discarded_at timestamp(6) without time zone,
+    finished_at timestamp(6) without time zone
+);
+
+
+--
+-- Name: good_job_executions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.good_job_executions (
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL,
+    active_job_id uuid NOT NULL,
+    job_class text,
+    queue_name text,
+    serialized_params jsonb,
+    scheduled_at timestamp(6) without time zone,
+    finished_at timestamp(6) without time zone,
+    error text,
+    error_event smallint,
+    error_backtrace text[],
+    process_id uuid
+);
+
+
+--
 -- Name: good_job_processes; Type: TABLE; Schema: public; Owner: -
 --
 
 CREATE TABLE public.good_job_processes (
-    id uuid DEFAULT public.gen_random_uuid() NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
     created_at timestamp(6) without time zone NOT NULL,
     updated_at timestamp(6) without time zone NOT NULL,
-    state jsonb
+    state jsonb,
+    lock_type smallint
 );
 
 
@@ -826,7 +891,7 @@ CREATE TABLE public.good_job_settings (
 --
 
 CREATE TABLE public.good_jobs (
-    id uuid DEFAULT public.gen_random_uuid() NOT NULL,
+    id uuid DEFAULT gen_random_uuid() NOT NULL,
     queue_name text,
     priority integer,
     serialized_params jsonb,
@@ -840,8 +905,18 @@ CREATE TABLE public.good_jobs (
     concurrency_key text,
     cron_key text,
     retried_good_job_id uuid,
-    cron_at timestamp without time zone
+    cron_at timestamp without time zone,
+    batch_id uuid,
+    batch_callback_id uuid,
+    is_discrete boolean,
+    executions_count integer,
+    job_class text,
+    error_event smallint,
+    labels text[],
+    locked_by_id uuid,
+    locked_at timestamp(6) without time zone
 );
+ALTER TABLE ONLY public.good_jobs ALTER COLUMN finished_at SET STATISTICS 1000;
 
 
 --
@@ -940,8 +1015,9 @@ CREATE TABLE public.media_assets (
     image_height integer NOT NULL,
     duration double precision,
     status integer DEFAULT 200 NOT NULL,
-    file_key character varying,
-    is_public boolean DEFAULT true NOT NULL
+    file_key character varying NOT NULL,
+    is_public boolean DEFAULT true NOT NULL,
+    pixel_hash uuid NOT NULL
 );
 
 
@@ -1077,7 +1153,9 @@ CREATE TABLE public.news_updates (
     creator_id integer NOT NULL,
     updater_id integer NOT NULL,
     created_at timestamp without time zone NOT NULL,
-    updated_at timestamp without time zone NOT NULL
+    updated_at timestamp without time zone NOT NULL,
+    is_deleted boolean DEFAULT false NOT NULL,
+    duration interval DEFAULT '14 days'::interval NOT NULL
 );
 
 
@@ -1179,39 +1257,6 @@ CREATE SEQUENCE public.notes_id_seq
 --
 
 ALTER SEQUENCE public.notes_id_seq OWNED BY public.notes.id;
-
-
---
--- Name: pixiv_ugoira_frame_data; Type: TABLE; Schema: public; Owner: -
---
-
-CREATE TABLE public.pixiv_ugoira_frame_data (
-    id integer NOT NULL,
-    post_id integer,
-    data text NOT NULL,
-    content_type character varying NOT NULL,
-    md5 character varying
-);
-
-
---
--- Name: pixiv_ugoira_frame_data_id_seq; Type: SEQUENCE; Schema: public; Owner: -
---
-
-CREATE SEQUENCE public.pixiv_ugoira_frame_data_id_seq
-    AS integer
-    START WITH 1
-    INCREMENT BY 1
-    NO MINVALUE
-    NO MAXVALUE
-    CACHE 1;
-
-
---
--- Name: pixiv_ugoira_frame_data_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
---
-
-ALTER SEQUENCE public.pixiv_ugoira_frame_data_id_seq OWNED BY public.pixiv_ugoira_frame_data.id;
 
 
 --
@@ -1434,7 +1479,9 @@ CREATE TABLE public.post_replacements (
     file_size integer,
     image_width integer,
     image_height integer,
-    md5 character varying
+    md5 character varying,
+    media_asset_id integer,
+    old_media_asset_id integer
 );
 
 
@@ -1708,6 +1755,41 @@ CREATE SEQUENCE public.rate_limits_id_seq
 --
 
 ALTER SEQUENCE public.rate_limits_id_seq OWNED BY public.rate_limits.id;
+
+
+--
+-- Name: reactions; Type: TABLE; Schema: public; Owner: -
+--
+
+CREATE TABLE public.reactions (
+    id integer NOT NULL,
+    created_at timestamp(6) without time zone NOT NULL,
+    updated_at timestamp(6) without time zone NOT NULL,
+    creator_id integer NOT NULL,
+    reaction_id integer NOT NULL,
+    model_type character varying NOT NULL,
+    model_id integer NOT NULL
+);
+
+
+--
+-- Name: reactions_id_seq; Type: SEQUENCE; Schema: public; Owner: -
+--
+
+CREATE SEQUENCE public.reactions_id_seq
+    AS integer
+    START WITH 1
+    INCREMENT BY 1
+    NO MINVALUE
+    NO MAXVALUE
+    CACHE 1;
+
+
+--
+-- Name: reactions_id_seq; Type: SEQUENCE OWNED BY; Schema: public; Owner: -
+--
+
+ALTER SEQUENCE public.reactions_id_seq OWNED BY public.reactions.id;
 
 
 --
@@ -2022,7 +2104,11 @@ CREATE TABLE public.user_events (
     updated_at timestamp(6) without time zone NOT NULL,
     user_id integer NOT NULL,
     user_session_id integer NOT NULL,
-    category integer NOT NULL
+    category integer NOT NULL,
+    ip_addr inet,
+    session_id uuid,
+    user_agent character varying,
+    metadata jsonb
 );
 
 
@@ -2102,7 +2188,10 @@ CREATE TABLE public.users (
     last_ip_addr inet,
     unread_dmail_count integer NOT NULL,
     theme integer NOT NULL,
-    upload_points integer NOT NULL
+    upload_points integer NOT NULL,
+    is_deleted boolean DEFAULT false NOT NULL,
+    totp_secret character varying,
+    backup_codes integer[]
 );
 
 
@@ -2751,13 +2840,6 @@ ALTER TABLE ONLY public.notes ALTER COLUMN id SET DEFAULT nextval('public.notes_
 
 
 --
--- Name: pixiv_ugoira_frame_data id; Type: DEFAULT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pixiv_ugoira_frame_data ALTER COLUMN id SET DEFAULT nextval('public.pixiv_ugoira_frame_data_id_seq'::regclass);
-
-
---
 -- Name: pool_versions id; Type: DEFAULT; Schema: public; Owner: -
 --
 
@@ -2832,6 +2914,13 @@ ALTER TABLE ONLY public.posts ALTER COLUMN id SET DEFAULT nextval('public.posts_
 --
 
 ALTER TABLE ONLY public.rate_limits ALTER COLUMN id SET DEFAULT nextval('public.rate_limits_id_seq'::regclass);
+
+
+--
+-- Name: reactions id; Type: DEFAULT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reactions ALTER COLUMN id SET DEFAULT nextval('public.reactions_id_seq'::regclass);
 
 
 --
@@ -3107,6 +3196,22 @@ ALTER TABLE ONLY public.forum_topics
 
 
 --
+-- Name: good_job_batches good_job_batches_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.good_job_batches
+    ADD CONSTRAINT good_job_batches_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: good_job_executions good_job_executions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.good_job_executions
+    ADD CONSTRAINT good_job_executions_pkey PRIMARY KEY (id);
+
+
+--
 -- Name: good_job_processes good_job_processes_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3203,14 +3308,6 @@ ALTER TABLE ONLY public.notes
 
 
 --
--- Name: pixiv_ugoira_frame_data pixiv_ugoira_frame_data_pkey; Type: CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pixiv_ugoira_frame_data
-    ADD CONSTRAINT pixiv_ugoira_frame_data_pkey PRIMARY KEY (id);
-
-
---
 -- Name: pool_versions pool_versions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -3296,6 +3393,14 @@ ALTER TABLE ONLY public.posts
 
 ALTER TABLE ONLY public.rate_limits
     ADD CONSTRAINT rate_limits_pkey PRIMARY KEY (id);
+
+
+--
+-- Name: reactions reactions_pkey; Type: CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.reactions
+    ADD CONSTRAINT reactions_pkey PRIMARY KEY (id);
 
 
 --
@@ -3663,6 +3768,13 @@ CREATE INDEX index_artists_on_is_banned ON public.artists USING btree (is_banned
 --
 
 CREATE INDEX index_artists_on_is_deleted ON public.artists USING btree (is_deleted);
+
+
+--
+-- Name: index_artists_on_lower_names; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_artists_on_lower_names ON public.artists USING gin (public.lower((ARRAY[(name)::text, (group_name)::text] || other_names)));
 
 
 --
@@ -4226,6 +4338,27 @@ CREATE INDEX index_forum_topics_on_updated_at ON public.forum_topics USING btree
 
 
 --
+-- Name: index_good_job_executions_on_active_job_id_and_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_job_executions_on_active_job_id_and_created_at ON public.good_job_executions USING btree (active_job_id, created_at);
+
+
+--
+-- Name: index_good_job_executions_on_process_id_and_created_at; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_job_executions_on_process_id_and_created_at ON public.good_job_executions USING btree (process_id, created_at);
+
+
+--
+-- Name: index_good_job_jobs_for_candidate_lookup; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_job_jobs_for_candidate_lookup ON public.good_jobs USING btree (priority, created_at) WHERE (finished_at IS NULL);
+
+
+--
 -- Name: index_good_job_settings_on_key; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4247,17 +4380,24 @@ CREATE INDEX index_good_jobs_jobs_on_priority_created_at_when_unfinished ON publ
 
 
 --
--- Name: index_good_jobs_on_active_job_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_good_jobs_on_active_job_id ON public.good_jobs USING btree (active_job_id);
-
-
---
 -- Name: index_good_jobs_on_active_job_id_and_created_at; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX index_good_jobs_on_active_job_id_and_created_at ON public.good_jobs USING btree (active_job_id, created_at);
+
+
+--
+-- Name: index_good_jobs_on_batch_callback_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_jobs_on_batch_callback_id ON public.good_jobs USING btree (batch_callback_id) WHERE (batch_callback_id IS NOT NULL);
+
+
+--
+-- Name: index_good_jobs_on_batch_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_jobs_on_batch_id ON public.good_jobs USING btree (batch_id) WHERE (batch_id IS NOT NULL);
 
 
 --
@@ -4268,17 +4408,38 @@ CREATE INDEX index_good_jobs_on_concurrency_key_when_unfinished ON public.good_j
 
 
 --
--- Name: index_good_jobs_on_cron_key_and_created_at; Type: INDEX; Schema: public; Owner: -
+-- Name: index_good_jobs_on_cron_key_and_created_at_cond; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE INDEX index_good_jobs_on_cron_key_and_created_at ON public.good_jobs USING btree (cron_key, created_at);
+CREATE INDEX index_good_jobs_on_cron_key_and_created_at_cond ON public.good_jobs USING btree (cron_key, created_at) WHERE (cron_key IS NOT NULL);
 
 
 --
--- Name: index_good_jobs_on_cron_key_and_cron_at; Type: INDEX; Schema: public; Owner: -
+-- Name: index_good_jobs_on_cron_key_and_cron_at_cond; Type: INDEX; Schema: public; Owner: -
 --
 
-CREATE UNIQUE INDEX index_good_jobs_on_cron_key_and_cron_at ON public.good_jobs USING btree (cron_key, cron_at);
+CREATE UNIQUE INDEX index_good_jobs_on_cron_key_and_cron_at_cond ON public.good_jobs USING btree (cron_key, cron_at) WHERE (cron_key IS NOT NULL);
+
+
+--
+-- Name: index_good_jobs_on_labels; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_jobs_on_labels ON public.good_jobs USING gin (labels) WHERE (labels IS NOT NULL);
+
+
+--
+-- Name: index_good_jobs_on_locked_by_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_jobs_on_locked_by_id ON public.good_jobs USING btree (locked_by_id) WHERE (locked_by_id IS NOT NULL);
+
+
+--
+-- Name: index_good_jobs_on_priority_scheduled_at_unfinished_unlocked; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_good_jobs_on_priority_scheduled_at_unfinished_unlocked ON public.good_jobs USING btree (priority, scheduled_at) WHERE ((finished_at IS NULL) AND (locked_by_id IS NULL));
 
 
 --
@@ -4492,6 +4653,13 @@ CREATE UNIQUE INDEX index_media_assets_on_md5_and_status ON public.media_assets 
 
 
 --
+-- Name: index_media_assets_on_pixel_hash; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_media_assets_on_pixel_hash ON public.media_assets USING btree (pixel_hash);
+
+
+--
 -- Name: index_media_assets_on_status; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -4664,20 +4832,6 @@ CREATE INDEX index_notes_on_body_tsvector ON public.notes USING gin (to_tsvector
 --
 
 CREATE INDEX index_notes_on_post_id ON public.notes USING btree (post_id);
-
-
---
--- Name: index_pixiv_ugoira_frame_data_on_md5; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX index_pixiv_ugoira_frame_data_on_md5 ON public.pixiv_ugoira_frame_data USING btree (md5);
-
-
---
--- Name: index_pixiv_ugoira_frame_data_on_post_id; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE UNIQUE INDEX index_pixiv_ugoira_frame_data_on_post_id ON public.pixiv_ugoira_frame_data USING btree (post_id);
 
 
 --
@@ -4954,6 +5108,34 @@ CREATE INDEX index_post_replacements_on_creator_id_and_created_at ON public.post
 
 
 --
+-- Name: index_post_replacements_on_md5; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_post_replacements_on_md5 ON public.post_replacements USING btree (md5);
+
+
+--
+-- Name: index_post_replacements_on_media_asset_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_post_replacements_on_media_asset_id ON public.post_replacements USING btree (media_asset_id);
+
+
+--
+-- Name: index_post_replacements_on_old_md5; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_post_replacements_on_old_md5 ON public.post_replacements USING btree (old_md5);
+
+
+--
+-- Name: index_post_replacements_on_old_media_asset_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_post_replacements_on_old_media_asset_id ON public.post_replacements USING btree (old_media_asset_id);
+
+
+--
 -- Name: index_post_replacements_on_post_id; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5087,27 +5269,6 @@ CREATE INDEX index_posts_on_created_at ON public.posts USING btree (created_at);
 
 
 --
--- Name: index_posts_on_file_size; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_posts_on_file_size ON public.posts USING btree (file_size);
-
-
---
--- Name: index_posts_on_image_height; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_posts_on_image_height ON public.posts USING btree (image_height);
-
-
---
--- Name: index_posts_on_image_width; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_posts_on_image_width ON public.posts USING btree (image_width);
-
-
---
 -- Name: index_posts_on_is_deleted; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5147,13 +5308,6 @@ CREATE INDEX index_posts_on_last_noted_at ON public.posts USING btree (last_note
 --
 
 CREATE UNIQUE INDEX index_posts_on_md5 ON public.posts USING btree (md5);
-
-
---
--- Name: index_posts_on_mpixels; Type: INDEX; Schema: public; Owner: -
---
-
-CREATE INDEX index_posts_on_mpixels ON public.posts USING btree (((((image_width * image_height))::numeric / 1000000.0)));
 
 
 --
@@ -5211,6 +5365,27 @@ CREATE INDEX index_posts_on_uploader_id_and_created_at ON public.posts USING btr
 --
 
 CREATE UNIQUE INDEX index_rate_limits_on_key_and_action ON public.rate_limits USING btree (key, action);
+
+
+--
+-- Name: index_reactions_on_creator_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_reactions_on_creator_id ON public.reactions USING btree (creator_id);
+
+
+--
+-- Name: index_reactions_on_model; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_reactions_on_model ON public.reactions USING btree (model_type, model_id);
+
+
+--
+-- Name: index_reactions_on_model_creator_reaction; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE UNIQUE INDEX index_reactions_on_model_creator_reaction ON public.reactions USING btree (model_type, model_id, creator_id, reaction_id);
 
 
 --
@@ -5466,6 +5641,13 @@ CREATE INDEX index_tags_on_post_count ON public.tags USING btree (post_count);
 
 
 --
+-- Name: index_tags_on_word_initials; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_tags_on_word_initials ON public.tags USING gin (public.array_initials((words)::text[]) public.gin_trgm_ops);
+
+
+--
 -- Name: index_upgrade_codes_on_code; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5585,10 +5767,38 @@ CREATE INDEX index_user_events_on_created_at ON public.user_events USING btree (
 
 
 --
+-- Name: index_user_events_on_ip_addr; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_user_events_on_ip_addr ON public.user_events USING btree (ip_addr);
+
+
+--
+-- Name: index_user_events_on_metadata; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_user_events_on_metadata ON public.user_events USING gin (metadata);
+
+
+--
+-- Name: index_user_events_on_session_id; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_user_events_on_session_id ON public.user_events USING btree (session_id);
+
+
+--
 -- Name: index_user_events_on_updated_at; Type: INDEX; Schema: public; Owner: -
 --
 
 CREATE INDEX index_user_events_on_updated_at ON public.user_events USING btree (updated_at);
+
+
+--
+-- Name: index_user_events_on_user_agent; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_user_events_on_user_agent ON public.user_events USING gin (user_agent public.gin_trgm_ops);
 
 
 --
@@ -5774,6 +5984,13 @@ CREATE INDEX index_users_on_inviter_id ON public.users USING btree (inviter_id) 
 
 
 --
+-- Name: index_users_on_is_deleted; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_users_on_is_deleted ON public.users USING btree (is_deleted) WHERE (is_deleted = true);
+
+
+--
 -- Name: index_users_on_last_ip_addr; Type: INDEX; Schema: public; Owner: -
 --
 
@@ -5820,6 +6037,13 @@ CREATE INDEX index_wiki_page_versions_on_updater_id_and_created_at ON public.wik
 --
 
 CREATE INDEX index_wiki_page_versions_on_wiki_page_id ON public.wiki_page_versions USING btree (wiki_page_id);
+
+
+--
+-- Name: index_wiki_pages_on_array_to_tsvector_lower_other_names; Type: INDEX; Schema: public; Owner: -
+--
+
+CREATE INDEX index_wiki_pages_on_array_to_tsvector_lower_other_names ON public.wiki_pages USING gin (array_to_tsvector(public.lower(other_names)));
 
 
 --
@@ -6038,6 +6262,14 @@ ALTER TABLE ONLY public.comments
 
 
 --
+-- Name: post_replacements fk_rails_317818fc2f; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.post_replacements
+    ADD CONSTRAINT fk_rails_317818fc2f FOREIGN KEY (media_asset_id) REFERENCES public.media_assets(id);
+
+
+--
 -- Name: api_keys fk_rails_32c28d0dc2; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6155,6 +6387,14 @@ ALTER TABLE ONLY public.post_approvals
 
 ALTER TABLE ONLY public.news_updates
     ADD CONSTRAINT fk_rails_502e0a41d1 FOREIGN KEY (updater_id) REFERENCES public.users(id) DEFERRABLE INITIALLY DEFERRED;
+
+
+--
+-- Name: post_replacements fk_rails_5077102432; Type: FK CONSTRAINT; Schema: public; Owner: -
+--
+
+ALTER TABLE ONLY public.post_replacements
+    ADD CONSTRAINT fk_rails_5077102432 FOREIGN KEY (old_media_asset_id) REFERENCES public.media_assets(id);
 
 
 --
@@ -6550,14 +6790,6 @@ ALTER TABLE ONLY public.posts
 
 
 --
--- Name: pixiv_ugoira_frame_data fk_rails_f249d093cc; Type: FK CONSTRAINT; Schema: public; Owner: -
---
-
-ALTER TABLE ONLY public.pixiv_ugoira_frame_data
-    ADD CONSTRAINT fk_rails_f249d093cc FOREIGN KEY (post_id) REFERENCES public.posts(id) DEFERRABLE INITIALLY DEFERRED;
-
-
---
 -- Name: artist_versions fk_rails_f37d58ea23; Type: FK CONSTRAINT; Schema: public; Owner: -
 --
 
@@ -6596,311 +6828,336 @@ ALTER TABLE ONLY public.user_upgrades
 SET search_path TO "$user", public;
 
 INSERT INTO "schema_migrations" (version) VALUES
-('20100204211522'),
-('20100204214746'),
-('20100205162521'),
-('20100205163027'),
-('20100205224030'),
-('20100211025616'),
-('20100211181944'),
-('20100211191709'),
-('20100211191716'),
-('20100213181847'),
-('20100213183712'),
-('20100214080549'),
-('20100214080557'),
-('20100214080605'),
-('20100215182234'),
-('20100215213756'),
-('20100215223541'),
-('20100215224629'),
-('20100215224635'),
-('20100215225710'),
-('20100215230642'),
-('20100219230537'),
-('20100221003655'),
-('20100221005812'),
-('20100223001012'),
-('20100224171915'),
-('20100224172146'),
-('20100307073438'),
-('20100309211553'),
-('20100318213503'),
-('20100826232512'),
-('20110328215652'),
-('20110328215701'),
-('20110607194023'),
-('20110717010705'),
-('20110722211855'),
-('20110815233456'),
-('20111101212358'),
-('20130106210658'),
-('20130114154400'),
-('20130219171111'),
-('20130219184743'),
-('20130221032344'),
-('20130221035518'),
-('20130221214811'),
-('20130302214500'),
-('20130305005138'),
-('20130307225324'),
-('20130308204213'),
-('20130318002652'),
-('20130318012517'),
-('20130318030619'),
-('20130318231740'),
-('20130320070700'),
-('20130322162059'),
-('20130322173202'),
-('20130322173859'),
-('20130323160259'),
-('20130326035904'),
-('20130328092739'),
-('20130331180246'),
-('20130331182719'),
-('20130401013601'),
-('20130409191950'),
-('20130417221643'),
-('20130424121410'),
-('20130506154136'),
-('20130606224559'),
-('20130618230158'),
-('20130620215658'),
-('20130712162600'),
-('20130914175431'),
-('20131006193238'),
-('20131117150705'),
-('20131118153503'),
-('20131130190411'),
-('20131209181023'),
-('20131217025233'),
-('20131225002748'),
-('20140111191413'),
-('20140204233337'),
-('20140221213349'),
-('20140428015134'),
-('20140505000956'),
-('20140603225334'),
-('20140604002414'),
-('20140613004559'),
-('20140701224800'),
-('20140722225753'),
-('20140725003232'),
-('20141009231234'),
-('20141017231608'),
-('20141120045943'),
-('20150119191042'),
-('20150120005624'),
-('20150128005954'),
-('20150403224949'),
-('20150613010904'),
-('20150623191904'),
-('20150629235905'),
-('20150705014135'),
-('20150721214646'),
-('20150728170433'),
-('20150805010245'),
-('20151217213321'),
-('20160219004022'),
-('20160219010854'),
-('20160219172840'),
-('20160222211328'),
-('20160526174848'),
-('20160820003534'),
-('20160822230752'),
-('20160919234407'),
-('20161018221128'),
-('20161024220345'),
-('20161101003139'),
-('20161221225849'),
-('20161227003428'),
-('20161229001201'),
-('20170106012138'),
-('20170112021922'),
-('20170112060921'),
-('20170117233040'),
-('20170218104710'),
-('20170302014435'),
-('20170314235626'),
-('20170316224630'),
-('20170319000519'),
-('20170329185605'),
-('20170330230231'),
-('20170413000209'),
-('20170414005856'),
-('20170414233426'),
-('20170414233617'),
-('20170416224142'),
-('20170428220448'),
-('20170512221200'),
-('20170515235205'),
-('20170519204506'),
-('20170526183928'),
-('20170608043651'),
-('20170613200356'),
-('20170709190409'),
-('20170914200122'),
-('20171106075030'),
-('20171127195124'),
-('20171218213037'),
-('20171219001521'),
-('20171230220225'),
-('20180113211343'),
-('20180116001101'),
-('20180403231351'),
-('20180413224239'),
-('20180425194016'),
-('20180516222413'),
-('20180517190048'),
-('20180518175154'),
-('20180804203201'),
-('20180816230604'),
-('20180912185624'),
-('20180913184128'),
-('20180916002448'),
-('20181108162204'),
-('20181108205842'),
-('20181113174914'),
-('20181114180205'),
-('20181114185032'),
-('20181114202744'),
-('20181130004740'),
-('20181202172145'),
-('20190109210822'),
-('20190129012253'),
-('20190712174818'),
-('20190827013252'),
-('20190827014726'),
-('20190827233235'),
-('20190827234625'),
-('20190828005453'),
-('20190829052629'),
-('20190829055758'),
-('20190902224045'),
-('20190908031103'),
-('20190908035317'),
-('20190919175836'),
-('20190923071044'),
-('20190926000912'),
-('20191023191749'),
-('20191024194544'),
-('20191111004329'),
-('20191111024520'),
-('20191116001441'),
-('20191116021759'),
-('20191116224228'),
-('20191117074642'),
-('20191117080647'),
-('20191117081229'),
-('20191117200404'),
-('20191119061018'),
-('20191223032633'),
-('20200114204550'),
-('20200115010442'),
-('20200117220602'),
-('20200118015014'),
-('20200119184442'),
-('20200119193110'),
-('20200123184743'),
-('20200217044719'),
-('20200223042415'),
-('20200223234015'),
-('20200306202253'),
-('20200307021204'),
-('20200309035334'),
-('20200309043653'),
-('20200318224633'),
-('20200325073456'),
-('20200325074859'),
-('20200403210353'),
-('20200406054838'),
-('20200427190519'),
-('20200803022359'),
-('20200816175151'),
-('20201201211748'),
-('20201213052805'),
-('20201219201007'),
-('20201224101208'),
-('20210106212805'),
-('20210108030722'),
-('20210108030723'),
-('20210108030724'),
-('20210110015410'),
-('20210110090656'),
-('20210115015308'),
-('20210123112752'),
-('20210127000201'),
-('20210127012303'),
-('20210214095121'),
-('20210214101614'),
-('20210303195217'),
-('20210310221248'),
-('20210330003356'),
-('20210330093133'),
-('20210901230931'),
-('20210908015203'),
-('20210921164936'),
-('20210921170444'),
-('20210926123414'),
-('20210926125826'),
-('20211008091234'),
-('20211010181657'),
-('20211011044400'),
-('20211013011619'),
-('20211014063943'),
-('20211015223510'),
-('20211018045429'),
-('20211018062916'),
-('20211023225730'),
-('20211121080239'),
-('20220101224048'),
-('20220104214319'),
-('20220106171727'),
-('20220106172910'),
-('20220107014433'),
-('20220109032042'),
-('20220109163815'),
-('20220110171021'),
-('20220110171022'),
-('20220110171023'),
-('20220110171024'),
-('20220120233850'),
-('20220124195900'),
-('20220203040648'),
-('20220204075610'),
-('20220207195123'),
-('20220210171310'),
-('20220210200157'),
-('20220211075129'),
-('20220318082614'),
-('20220403042706'),
-('20220403220558'),
-('20220407203236'),
-('20220410050628'),
-('20220504235329'),
-('20220514175125'),
-('20220525214746'),
-('20220623052547'),
-('20220627211714'),
-('20220829184824'),
-('20220909205433'),
-('20220909211649'),
-('20220913191300'),
-('20220913191309'),
-('20220917204044'),
-('20220918031429'),
-('20220919041622'),
-('20220920224005'),
-('20220921022408'),
-('20220922014326'),
-('20220923010905'),
-('20220924092056'),
-('20220925045236'),
-('20220926050108'),
-('20221003080342'),
-('20221010035855'),
-('20221026084655'),
+('20241023091114'),
+('20241022174253'),
+('20240607200251'),
+('20240607200250'),
+('20240607200249'),
+('20240221060848'),
+('20240217201829'),
+('20240131055326'),
+('20240110180956'),
+('20240110180955'),
+('20240110180954'),
+('20240110180953'),
+('20240110180952'),
+('20230524201206'),
+('20230522005908'),
+('20230409141638'),
+('20230401013159'),
+('20230325143851'),
+('20230309014439'),
+('20230222230650'),
+('20230209060757'),
+('20230104064916'),
+('20221230011825'),
+('20221228232240'),
+('20221109052923'),
+('20221106062419'),
+('20221027000931'),
 ('20221026084656'),
-('20221027000931');
-
+('20221026084655'),
+('20221010035855'),
+('20221003080342'),
+('20220926050108'),
+('20220925045236'),
+('20220924092056'),
+('20220923010905'),
+('20220922014326'),
+('20220921022408'),
+('20220920224005'),
+('20220919041622'),
+('20220918031429'),
+('20220917204044'),
+('20220913191309'),
+('20220913191300'),
+('20220909211649'),
+('20220909205433'),
+('20220829184824'),
+('20220627211714'),
+('20220623052547'),
+('20220525214746'),
+('20220514175125'),
+('20220504235329'),
+('20220410050628'),
+('20220407203236'),
+('20220403220558'),
+('20220403042706'),
+('20220318082614'),
+('20220211075129'),
+('20220210200157'),
+('20220210171310'),
+('20220207195123'),
+('20220204075610'),
+('20220203040648'),
+('20220124195900'),
+('20220120233850'),
+('20220110171024'),
+('20220110171023'),
+('20220110171022'),
+('20220110171021'),
+('20220109163815'),
+('20220109032042'),
+('20220107014433'),
+('20220106172910'),
+('20220106171727'),
+('20220104214319'),
+('20220101224048'),
+('20211121080239'),
+('20211023225730'),
+('20211018062916'),
+('20211018045429'),
+('20211015223510'),
+('20211014063943'),
+('20211013011619'),
+('20211011044400'),
+('20211010181657'),
+('20211008091234'),
+('20210926125826'),
+('20210926123414'),
+('20210921170444'),
+('20210921164936'),
+('20210908015203'),
+('20210901230931'),
+('20210330093133'),
+('20210330003356'),
+('20210310221248'),
+('20210303195217'),
+('20210214101614'),
+('20210214095121'),
+('20210127012303'),
+('20210127000201'),
+('20210123112752'),
+('20210115015308'),
+('20210110090656'),
+('20210110015410'),
+('20210108030724'),
+('20210108030723'),
+('20210108030722'),
+('20210106212805'),
+('20201224101208'),
+('20201219201007'),
+('20201213052805'),
+('20201201211748'),
+('20200816175151'),
+('20200803022359'),
+('20200427190519'),
+('20200406054838'),
+('20200403210353'),
+('20200325074859'),
+('20200325073456'),
+('20200318224633'),
+('20200309043653'),
+('20200309035334'),
+('20200307021204'),
+('20200306202253'),
+('20200223234015'),
+('20200223042415'),
+('20200217044719'),
+('20200123184743'),
+('20200119193110'),
+('20200119184442'),
+('20200118015014'),
+('20200117220602'),
+('20200115010442'),
+('20200114204550'),
+('20191223032633'),
+('20191119061018'),
+('20191117200404'),
+('20191117081229'),
+('20191117080647'),
+('20191117074642'),
+('20191116224228'),
+('20191116021759'),
+('20191116001441'),
+('20191111024520'),
+('20191111004329'),
+('20191024194544'),
+('20191023191749'),
+('20190926000912'),
+('20190923071044'),
+('20190919175836'),
+('20190908035317'),
+('20190908031103'),
+('20190902224045'),
+('20190829055758'),
+('20190829052629'),
+('20190828005453'),
+('20190827234625'),
+('20190827233235'),
+('20190827014726'),
+('20190827013252'),
+('20190712174818'),
+('20190129012253'),
+('20190109210822'),
+('20181202172145'),
+('20181130004740'),
+('20181114202744'),
+('20181114185032'),
+('20181114180205'),
+('20181113174914'),
+('20181108205842'),
+('20181108162204'),
+('20180916002448'),
+('20180913184128'),
+('20180912185624'),
+('20180816230604'),
+('20180804203201'),
+('20180518175154'),
+('20180517190048'),
+('20180516222413'),
+('20180425194016'),
+('20180413224239'),
+('20180403231351'),
+('20180116001101'),
+('20180113211343'),
+('20171230220225'),
+('20171219001521'),
+('20171218213037'),
+('20171127195124'),
+('20171106075030'),
+('20170914200122'),
+('20170709190409'),
+('20170613200356'),
+('20170608043651'),
+('20170526183928'),
+('20170519204506'),
+('20170515235205'),
+('20170512221200'),
+('20170428220448'),
+('20170416224142'),
+('20170414233617'),
+('20170414233426'),
+('20170414005856'),
+('20170413000209'),
+('20170330230231'),
+('20170329185605'),
+('20170319000519'),
+('20170316224630'),
+('20170314235626'),
+('20170302014435'),
+('20170218104710'),
+('20170117233040'),
+('20170112060921'),
+('20170112021922'),
+('20170106012138'),
+('20161229001201'),
+('20161227003428'),
+('20161221225849'),
+('20161101003139'),
+('20161024220345'),
+('20161018221128'),
+('20160919234407'),
+('20160822230752'),
+('20160820003534'),
+('20160526174848'),
+('20160222211328'),
+('20160219172840'),
+('20160219010854'),
+('20160219004022'),
+('20151217213321'),
+('20150805010245'),
+('20150728170433'),
+('20150721214646'),
+('20150705014135'),
+('20150629235905'),
+('20150623191904'),
+('20150613010904'),
+('20150403224949'),
+('20150128005954'),
+('20150120005624'),
+('20150119191042'),
+('20141120045943'),
+('20141017231608'),
+('20141009231234'),
+('20140725003232'),
+('20140722225753'),
+('20140701224800'),
+('20140613004559'),
+('20140604002414'),
+('20140603225334'),
+('20140505000956'),
+('20140428015134'),
+('20140221213349'),
+('20140204233337'),
+('20140111191413'),
+('20131225002748'),
+('20131217025233'),
+('20131209181023'),
+('20131130190411'),
+('20131118153503'),
+('20131117150705'),
+('20131006193238'),
+('20130914175431'),
+('20130712162600'),
+('20130620215658'),
+('20130618230158'),
+('20130606224559'),
+('20130506154136'),
+('20130424121410'),
+('20130417221643'),
+('20130409191950'),
+('20130401013601'),
+('20130331182719'),
+('20130331180246'),
+('20130328092739'),
+('20130326035904'),
+('20130323160259'),
+('20130322173859'),
+('20130322173202'),
+('20130322162059'),
+('20130320070700'),
+('20130318231740'),
+('20130318030619'),
+('20130318012517'),
+('20130318002652'),
+('20130308204213'),
+('20130307225324'),
+('20130305005138'),
+('20130302214500'),
+('20130221214811'),
+('20130221035518'),
+('20130221032344'),
+('20130219184743'),
+('20130219171111'),
+('20130114154400'),
+('20130106210658'),
+('20111101212358'),
+('20110815233456'),
+('20110722211855'),
+('20110717010705'),
+('20110607194023'),
+('20110328215701'),
+('20110328215652'),
+('20100826232512'),
+('20100318213503'),
+('20100309211553'),
+('20100307073438'),
+('20100224172146'),
+('20100224171915'),
+('20100223001012'),
+('20100221005812'),
+('20100221003655'),
+('20100219230537'),
+('20100215230642'),
+('20100215225710'),
+('20100215224635'),
+('20100215224629'),
+('20100215223541'),
+('20100215213756'),
+('20100215182234'),
+('20100214080605'),
+('20100214080557'),
+('20100214080549'),
+('20100213183712'),
+('20100213181847'),
+('20100211191716'),
+('20100211191709'),
+('20100211181944'),
+('20100211025616'),
+('20100205224030'),
+('20100205163027'),
+('20100205162521'),
+('20100204214746'),
+('20100204211522');
 

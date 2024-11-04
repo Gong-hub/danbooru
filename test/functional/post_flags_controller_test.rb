@@ -6,7 +6,7 @@ class PostFlagsControllerTest < ActionDispatch::IntegrationTest
       @user = create(:user)
       @flagger = create(:gold_user, id: 999, created_at: 2.weeks.ago)
       @uploader = create(:mod_user, name: "chen", created_at: 2.weeks.ago)
-      @mod = create(:mod_user, name: "mod")
+      @mod = create(:mod_user, name: "mod123")
       @post = create(:post, id: 101, uploader: @uploader)
       @post_flag = create(:post_flag, reason: "xxx", post: @post, creator: @flagger)
     end
@@ -113,7 +113,7 @@ class PostFlagsControllerTest < ActionDispatch::IntegrationTest
           @post_flag = create(:post_flag, creator: @mod, post: build(:post, uploader: @mod))
         end
 
-        should respond_to_search(creator_name: "mod").with { @post_flag }
+        should respond_to_search(creator_name: "mod123").with { @post_flag }
       end
 
       context "when the user is the flagger" do
@@ -155,6 +155,16 @@ class PostFlagsControllerTest < ActionDispatch::IntegrationTest
         assert_equal(true, @post.reload.is_deleted?)
         assert_equal(0, @post.flags.count)
       end
+
+      should "not allow flagging a post that is not visible to the user" do
+        @post = create(:post, is_banned: true)
+        post_auth post_flags_path, @flagger, params: { post_flag: { post_id: @post.id, reason: "xxx" }}, as: :javascript
+
+        assert_response :success
+        assert_equal(false, @post.reload.is_flagged?)
+        assert_equal(0, @post.flags.count)
+      end
+
     end
 
     context "edit action" do

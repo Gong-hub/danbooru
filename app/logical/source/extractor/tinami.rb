@@ -4,11 +4,6 @@
 module Source
   class Extractor
     class Tinami < Source::Extractor
-
-      def match?
-        Source::URL::Tinami === parsed_url
-      end
-
       def image_urls
         if parsed_url.image_url?
           [url]
@@ -41,13 +36,9 @@ module Source
         page&.css(".viewbody #controller_model .thumbnail_list").to_a.map { |td| td.attr("sub_id") }
       end
 
-      def page_url
-        parsed_url.page_url || parsed_referer&.page_url
-      end
-
       def tags
         page&.css("#view .tag a[href^='/search/list']").to_a.map do |tag|
-          [tag.text, "https://www.tinami.com/search/list?keyword=#{CGI.escape(tag.text)}"]
+          [tag.text, "https://www.tinami.com/search/list?keyword=#{Danbooru::URL.escape(tag.text)}"]
         end
       end
 
@@ -56,10 +47,10 @@ module Source
       end
 
       def tag_name
-        nil
+        "tinami_#{user_id}" if user_id.present?
       end
 
-      def artist_name
+      def display_name
         page&.at("#view .prof > p > a > strong")&.text
       end
 
@@ -68,7 +59,11 @@ module Source
       end
 
       def artist_commentary_desc
-        page&.at("#view .comment .description")&.text.to_s.strip.delete("\t")
+        page&.at("#view .comment .description")&.to_html
+      end
+
+      def dtext_artist_commentary_desc
+        DText.from_html(artist_commentary_desc, base_url: "http://www.tinami.com")
       end
 
       def user_id
@@ -94,20 +89,15 @@ module Source
         response.parse.at("body > div > a > img[src^='//img.tinami.com']")&.attr("src")&.prepend("https:")
       end
 
-      def page
-        return nil if page_url.blank?
-
-        response = http.cache(1.minute).get(page_url)
-        return nil unless response.status == 200
-
-        response.parse
+      memoize def page
+        http.cache(1.minute).parsed_get(page_url)
       end
 
       def http
         super.cookies(Tinami2SESSID: Danbooru.config.tinami_session_id).use(:spoof_referrer)
       end
 
-      memoize :page, :user_id, :work_id, :ethna_csrf, :image_urls, :image_sub_ids, :nv_body_image_urls
+      memoize :user_id, :work_id, :ethna_csrf, :image_urls, :image_sub_ids, :nv_body_image_urls
     end
   end
 end

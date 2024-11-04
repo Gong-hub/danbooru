@@ -5,12 +5,20 @@ class MediaAssetPolicy < ApplicationPolicy
     true
   end
 
+  def destroy?
+    user.is_admin?
+  end
+
   def image?
     can_see_image?
   end
 
   def can_see_image?
-    record.post.blank? || record.post.visible?(user)
+    !record.removed? && (record.post.blank? || record.post.visible?(user))
+  end
+
+  def reportable?
+    record.post.blank?
   end
 
   def api_attributes

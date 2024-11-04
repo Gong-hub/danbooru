@@ -1,8 +1,8 @@
 # frozen_string_literal: true
 
 module ComponentsHelper
-  def post_preview(post, fit: :fixed, **options)
-    render PostPreviewComponent.new(post: post, fit: fit, **options)
+  def post_preview(post, fit: :fixed, **options, &block)
+    render PostPreviewComponent.new(post: post, fit: fit, **options), &block
   end
 
   # Render a set of posts as thumbnail gallery.
@@ -14,7 +14,7 @@ module ComponentsHelper
 
     render(PostGalleryComponent.new(**options)) do |gallery|
       posts.each do |post|
-        gallery.post(post: post, size: gallery.size, **options)
+        gallery.with_post(post: post, size: gallery.size, **options)
       end
 
       if block_given?
@@ -55,12 +55,6 @@ module ComponentsHelper
     render SourceDataComponent.new(source: source, **options)
   end
 
-  # A simple vertical tag list with no post counts. Used in related tags.
-  def render_related_tag_list(tag_names, **options)
-    tags = RelatedTagListComponent.tags_from_names(tag_names)
-    render RelatedTagListComponent.new(tags: tags, **options)
-  end
-
   # A horizontal tag list, with tags grouped by category. Used in post
   # tooltips, on the comments index, and in the modqueue.
   def render_inline_tag_list(post, **options)
@@ -77,17 +71,15 @@ module ComponentsHelper
     render CategorizedTagListComponent.new(tags: post.tags, **options)
   end
 
-  # A vertical tag list, used in the post index sidebar.
-  def render_search_tag_list(tag_names, **options)
-    tags = SearchTagListComponent.tags_from_names(tag_names)
-    render SearchTagListComponent.new(tags: tags, **options)
-  end
-
   # The <link rel="next"> / <link rel="prev"> links in the <meta> element of the <head>.
   def render_meta_links(records)
     render MetaLinksComponent.new(records: records, params: params)
   rescue ActiveRecord::StatementInvalid
     # Swallow any exceptions when loading records so that the page load doesn't fail.
+  end
+
+  def render_tag_change_notice(tag:, current_user:)
+    render TagChangeNoticeComponent.new(tag: tag, current_user: current_user)
   end
 
   def numbered_paginator(records)
@@ -96,5 +88,10 @@ module ComponentsHelper
     else
       render SequentialPaginatorComponent.new(records: records, params: params)
     end
+  end
+
+  def help_tooltip(content = nil, icon: help_icon, **options, &block)
+    content = yield if block_given?
+    render HelpTooltipComponent.new(icon, content, **options)
   end
 end

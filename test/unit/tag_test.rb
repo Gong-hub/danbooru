@@ -68,10 +68,10 @@ class TagTest < ActiveSupport::TestCase
 
     should "reset its category after updating" do
       tag = FactoryBot.create(:artist_tag)
-      assert_equal(Tag.categories.artist, Cache.get("tc:#{Cache.hash(tag.name)}"))
+      assert_equal(Tag.categories.artist, Cache.get("tag-category:#{Cache.hash(tag.name)}"))
 
       tag.update!(category: Tag.categories.copyright, updater: create(:user))
-      assert_equal(Tag.categories.copyright, Cache.get("tc:#{Cache.hash(tag.name)}"))
+      assert_equal(Tag.categories.copyright, Cache.get("tag-category:#{Cache.hash(tag.name)}"))
     end
 
     context "not be settable to an invalid category" do
@@ -175,15 +175,37 @@ class TagTest < ActiveSupport::TestCase
       assert_equal(0, tag.reload.category)
     end
 
+    should "not change category if the tag is aliased" do
+      t1 = create(:tag, name: "ff7", category: Tag.categories.copyright)
+      t2 = create(:tag, name: "final_fantasy_vii", category: Tag.categories.copyright)
+      ta = create(:tag_alias, antecedent_name: "ff7", consequent_name: "final_fantasy_vii")
+
+      t1.reload.category = Tag.categories.character
+
+      assert_equal(false, t1.valid?)
+      assert_equal(["Can't change the category of an aliased tag"], t1.errors[:base])
+    end
+
     should "update post tag counts when the category is changed" do
       post = FactoryBot.create(:post, tag_string: "test")
       assert_equal(1, post.tag_count_general)
       assert_equal(0, post.tag_count_character)
 
       tag = Tag.find_or_create_by_name("test", category: "char", current_user: @builder)
+      perform_enqueued_jobs(only: UpdateTagCategoryPostCountsJob)
       post.reload
+
       assert_equal(0, post.tag_count_general)
       assert_equal(1, post.tag_count_character)
+    end
+
+    should "update aliased tags when the tag's category is changed" do
+      t1 = create(:tag, name: "ff7", category: Tag.categories.general)
+      t2 = create(:tag, name: "final_fantasy_vii", category: Tag.categories.general)
+      ta = create(:tag_alias, antecedent_name: "ff7", consequent_name: "final_fantasy_vii")
+      t2.update!(category: Tag.categories.copyright, updater: User.system)
+
+      assert_equal("Copyright", t1.reload.category_name)
     end
 
     should "be created when one doesn't exist" do
@@ -191,6 +213,7 @@ class TagTest < ActiveSupport::TestCase
         tag = Tag.find_or_create_by_name("hoge")
         assert_equal("hoge", tag.name)
         assert_equal(Tag.categories.general, tag.category)
+        assert_equal(0, tag.versions.count)
       end
     end
 
@@ -199,7 +222,15 @@ class TagTest < ActiveSupport::TestCase
         tag = Tag.find_or_create_by_name("hoge", category: "artist", current_user: @builder)
         assert_equal("hoge", tag.name)
         assert_equal(Tag.categories.artist, tag.category)
+        assert_equal(0, tag.versions.count)
       end
+    end
+
+    should "not raise an exception if the tag name is invalid" do
+      tag = Tag.find_or_create_by_name("foo__bar")
+
+      assert_equal(false, tag.valid?)
+      assert_equal(["'foo__bar' cannot contain consecutive underscores"], tag.errors[:name])
     end
 
     should "parse tag names into words" do

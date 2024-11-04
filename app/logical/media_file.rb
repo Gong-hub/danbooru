@@ -10,22 +10,43 @@ class MediaFile
   extend Memoist
   include ActiveModel::Serializers::JSON
 
-  attr_accessor :file, :strict
+  attr_accessor :file
 
   # delegate all File methods to `file`.
   delegate *(File.instance_methods - MediaFile.instance_methods), to: :file
 
-  # Open a file or filename and return a MediaFile object.
+  # Open a file or filename and return a MediaFile object. If a block is given,
+  # pass the file to the block and return the result after closing the file.
   #
-  # @param file [File, String] a filename or an open File object
+  # @param file [File, MediaFile, String] A filename or an open File object.
   # @param options [Hash] extra options for the MediaFile subclass.
-  # @return [MediaFile] the media file
-  def self.open(file, **options)
-    return file.dup if file.is_a?(MediaFile)
+  # @yieldparam media_file [MediaFile] The opened media file.
+  # @return [MediaFile] The media file.
+  def self.open(file, **options, &block)
+    if file.is_a?(MediaFile)
+      media_file = file
+    else
+      file = Kernel.open(file, "r", binmode: true) unless file.respond_to?(:read)
+      media_file = new_from_file(file, **options)
+    end
 
-    file = Kernel.open(file, "r", binmode: true) unless file.respond_to?(:read)
+    if block_given?
+      result = yield media_file
+      media_file.close
+      result
+    else
+      media_file
+    end
+  end
 
-    case file_ext(file)
+  # Return a new MediaFile from an open File object.
+  #
+  # @param file [File] The File object.
+  # @param file_ext [Symbol] The file extension.
+  # @param options [Hash] Extra options for the MediaFile subclass.
+  # @return [MediaFile] The media file.
+  def self.new_from_file(file, file_ext = MediaFile.file_ext(file), **options)
+    case file_ext
     when :jpg, :gif, :png, :webp, :avif
       MediaFile::Image.new(file, **options)
     when :swf
@@ -43,54 +64,7 @@ class MediaFile
   # @param [File] an open file
   # @return [Symbol] the file's type
   def self.file_ext(file)
-    header = file.pread(16, 0)
-
-    case header
-    when /\A\xff\xd8/n
-      :jpg
-    when /\AGIF87a/, /\AGIF89a/
-      :gif
-    when /\A\x89PNG\r\n\x1a\n/n
-      :png
-    when /\ACWS/, /\AFWS/, /\AZWS/
-      :swf
-
-    # This detects the Matroska (.mkv) header. WebM files have a DocType of "webm", which is checked later in `MediaFile::Video#is_supported?`.
-    #
-    # https://www.rfc-editor.org/rfc/rfc8794.html#section-8.1
-    # https://www.webmproject.org/docs/container/
-    when /\A\x1a\x45\xdf\xa3/n
-      :webm
-
-    # https://developers.google.com/speed/webp/docs/riff_container
-    when /\ARIFF....WEBP/
-      :webp
-
-    # https://www.ftyps.com
-    # https://cconcolato.github.io/mp4ra/filetype.html
-    # https://github.com/mozilla/gecko-dev/blob/master/toolkit/components/mediasniffer/nsMediaSniffer.cpp#L78
-    # https://mimesniff.spec.whatwg.org/#signature-for-mp4
-    #
-    # isom (common) - MP4 Base Media v1 [IS0 14496-12:2003]
-    # mp42 (common) - MP4 v2 [ISO 14496-14]
-    # iso4 (rare) - MP4 Base Media v4
-    # iso5 (rare) - MP4 Base Media v5 (used by Twitter)
-    # 3gp5 (rare) - 3GPP Media (.3GP) Release 5 (XXX technically this should be .3gp, not .mp4. Supported by Chrome but not Firefox)
-    # avc1 (rare) - MP4 Base w/ AVC ext [ISO 14496-12:2005]
-    # M4V (rare) - Apple iTunes Video (https://en.wikipedia.org/wiki/M4V)
-    when /\A....ftyp(?:mp4|avc|iso|3gp5|M4V)/
-      :mp4
-
-    # https://aomediacodec.github.io/av1-avif/#brands-overview
-    when /\A....ftyp(?:avif|avis)/
-      :avif
-    when /\APK\x03\x04/
-      :zip
-    else
-      :bin
-    end
-  rescue EOFError
-    :bin
+    FileTypeDetector.new(file).file_ext
   end
 
   # @return [Boolean] true if we can generate video previews.
@@ -101,11 +75,8 @@ class MediaFile
   # Initialize a MediaFile from a regular File.
   #
   # @param file [File] The image file.
-  # @param strict [Boolean] If true, raise errors if the file is corrupt. If false,
-  #   try to process corrupt files without raising any errors.
-  def initialize(file, strict: true, **options)
+  def initialize(file, **options)
     @file = file
-    @strict = strict
   end
 
   # @return [Array<(Integer, Integer)>] the width and height of the file
@@ -128,9 +99,24 @@ class MediaFile
     width * height
   end
 
+  # @return [String] The MD5 hash of the file, as a hex string.
+  def self.md5(filename, **options)
+    MediaFile.open(filename, **options, &:md5)
+  end
+
   # @return [String] the MD5 hash of the file, as a hex string.
   def md5
     Digest::MD5.file(file.path).hexdigest
+  end
+
+  # @return [String] The MD5 hash of the image's pixel data, or just the file's MD5 if we can't compute a hash of the image data.
+  def self.pixel_hash(filename, **options)
+    MediaFile.open(filename, **options, &:pixel_hash)
+  end
+
+  # @return [String] The MD5 hash of the image's pixel data, or just the file's MD5 if we can't compute a hash of the image data.
+  def pixel_hash
+    md5
   end
 
   # @return [Symbol] the detected file extension
@@ -143,7 +129,15 @@ class MediaFile
     file.size
   end
 
+  # @return [ExifTool::Metadata] The metadata for the file. Subclasses may override this to add
+  #   extra non-ExifTool metadata, such as error messages, Ugoira frame delays, or ffprobe metadata.
+  #   This metadata may be slower to calculate than the raw `exif_metadata`.
   def metadata
+    exif_metadata
+  end
+
+  # @return [ExifTool::Metadata] The metadata for the file, as returned by ExifTool.
+  def exif_metadata
     ExifTool.new(file).metadata
   end
 
@@ -186,9 +180,14 @@ class MediaFile
     file_ext == :swf
   end
 
-  # @return [Boolean] true if the file is corrupted in some way
+  # @return [Boolean] True if the file is too corrupted to read or generate thumbnails without error.
   def is_corrupt?
-    false
+    error.present?
+  end
+
+  # @return [String, nil] The error message when reading the file, or nil if there are no errors.
+  def error
+    nil
   end
 
   # @return [Boolean] true if the file is animated. Note that GIFs and PNGs may be animated.
@@ -243,11 +242,7 @@ class MediaFile
   #
   # @return [Array<AITag>] The list of AI tags.
   def ai_tags(autotagger: AutotaggerClient.new)
-    tags = autotagger.evaluate(self)
-
-    tags.map do |tag, score|
-      AITag.new(tag: tag, score: (100*score).round)
-    end
+    autotagger.evaluate!(self)
   end
 
   def attributes
@@ -257,8 +252,9 @@ class MediaFile
       height: height,
       file_size: file_size,
       file_ext: file_ext,
-      mime_type: mime_type,
+      mime_type: mime_type.to_s,
       md5: md5,
+      pixel_hash: pixel_hash,
       is_corrupt?: is_corrupt?,
       is_supported?: is_supported?,
       duration: duration,
@@ -281,5 +277,5 @@ class MediaFile
     end
   end
 
-  memoize :file_ext, :file_size, :md5, :metadata, :mime_type
+  memoize :file_ext, :file_size, :md5, :mime_type, :exif_metadata
 end

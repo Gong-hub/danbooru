@@ -65,11 +65,6 @@ class PostPolicy < ApplicationPolicy
     user.is_gold?
   end
 
-  # whether to show the + - links in the tag list.
-  def show_extra_links?
-    user.is_gold?
-  end
-
   def permitted_attributes_for_create
     %i[upload_id media_asset_id upload_media_asset_id tag_string rating
     parent_id source is_pending artist_commentary_desc artist_commentary_title
@@ -88,7 +83,7 @@ class PostPolicy < ApplicationPolicy
 
   def api_attributes
     attributes = super
-    attributes += [:has_large, :has_visible_children]
+    attributes += [:has_large, :has_visible_children, :media_asset]
     attributes += TagCategory.categories.map {|x| "tag_string_#{x}".to_sym}
     attributes += [:file_url, :large_file_url, :preview_file_url] if visible?
     attributes -= [:md5] if !visible?

@@ -4,6 +4,25 @@ class Post < ApplicationRecord
   class RevertError < StandardError; end
   class DeletionError < StandardError; end
 
+  # The maximum number of tags a post can have.
+  MAX_TAG_COUNT = 1250
+
+  # The maximum number of new tags that can be created by a single user. Default is 20 tags per minute.
+  MAX_NEW_TAGS = 20
+  MAX_NEW_TAGS_INTERVAL = 1.minute
+
+  # The maximum number of tags that can be added or removed by a user per minute. Default is 100 tags per minute.
+  # Builders and the uploader aren't subject to this restriction.
+  MAX_CHANGED_TAGS = 100
+  MAX_CHANGED_TAGS_INTERVAL = 1.minute
+
+  # The maximum number of levels in a parent-child hierarchy. By default, a parent-child hierarchy can be no more than 4
+  # levels deep. That is, a post can have children, grandchildren, and great-grandchildren, but no great-great-grandchildren.
+  MAX_PARENT_DEPTH = 4
+
+  # The maximum number of child posts that a parent post may have.
+  MAX_CHILD_POSTS = 30
+
   # Tags to copy when copying notes.
   NOTE_COPY_TAGS = %w[translated partially_translated check_translation translation_request reverse_translation
                       annotated partially_annotated check_annotation annotation_request]
@@ -29,15 +48,20 @@ class Post < ApplicationRecord
   normalize :source, :normalize_source
   before_validation :merge_old_changes
   before_validation :apply_pre_metatags
+  before_validation :validate_new_tags
   before_validation :normalize_tags
   before_validation :blank_out_nonexistent_parents
   before_validation :remove_parent_loops
+  validate :uploader_is_not_limited, on: :create
+  validate :validate_no_parent_cycles
+  validate :validate_parent_depth
+  validate :validate_child_count
+  validate :validate_changed_tags
+  validate :validate_tag_count
   validates :md5, uniqueness: { message: ->(post, _data) { "Duplicate of post ##{Post.find_by_md5(post.md5).id}" }}, on: :create
   validates :rating, presence: { message: "not selected" }
   validates :rating, inclusion: { in: RATINGS.keys, message: "must be #{RATINGS.keys.map(&:upcase).to_sentence(last_word_connector: ", or ")}" }, if: -> { rating.present? }
   validates :source, length: { maximum: 1200 }
-  validate :post_is_not_its_own_parent
-  validate :uploader_is_not_limited, on: :create
   before_save :parse_pixiv_id
   before_save :added_tags_are_valid
   before_save :removed_tags_are_valid
@@ -55,7 +79,7 @@ class Post < ApplicationRecord
   belongs_to :approver, class_name: "User", optional: true
   belongs_to :uploader, :class_name => "User", :counter_cache => "post_upload_count"
   belongs_to :parent, class_name: "Post", optional: true
-  has_one :media_asset, -> { active }, foreign_key: :md5, primary_key: :md5
+  has_one :media_asset, -> { active }, foreign_key: :md5, primary_key: :md5, inverse_of: :post
   has_one :media_metadata, through: :media_asset
   has_one :artist_commentary, :dependent => :destroy
   has_one :vote_by_current_user, -> { active.where(user_id: CurrentUser.id) }, class_name: "PostVote" # XXX using current user here is wrong
@@ -72,6 +96,9 @@ class Post < ApplicationRecord
   has_many :ai_tags, through: :media_asset
   has_many :events, class_name: "PostEvent"
   has_many :mod_actions, as: :subject, dependent: :destroy
+  has_many :reactions, as: :model, dependent: :destroy, class_name: "Reaction"
+  has_many :dtext_links, -> { embedded_post }, foreign_key: :link_target
+  has_many :embedding_wiki_pages, through: :dtext_links, source: :model, source_type: "WikiPage"
 
   attr_accessor :old_tag_string, :old_parent_id, :old_source, :old_rating, :has_constraints, :disable_versioning, :post_edit
 
@@ -79,9 +106,9 @@ class Post < ApplicationRecord
   scope :flagged, -> { where(is_flagged: true) }
   scope :banned, -> { where(is_banned: true) }
   # XXX conflict with deletable
-  scope :active, -> { where(is_pending: false, is_deleted: false, is_flagged: false).where.not(id: PostAppeal.pending) }
+  scope :active, -> { where(is_pending: false, is_deleted: false, is_flagged: false) }
   scope :appealed, -> { where(id: PostAppeal.pending.select(:post_id)) }
-  scope :in_modqueue, -> { where_union(pending, flagged, appealed) }
+  scope :in_modqueue, -> { where_union_all(pending, flagged, appealed) }
   scope :expired, -> { pending.where("posts.created_at < ?", Danbooru.config.moderation_period.ago) }
 
   scope :unflagged, -> { where(is_flagged: false) }
@@ -164,19 +191,7 @@ class Post < ApplicationRecord
     def preview_file_url
       # XXX hack to return placeholder thumbnail for Flash files the /posts.json API.
       return Danbooru.config.storage_manager.file_url("/images/flash-preview.png") if media_asset.is_flash?
-      media_asset.variant(:preview).file_url
-    end
-
-    def open_graph_image_url
-      if is_image?
-        if has_large?
-          large_file_url
-        else
-          file_url
-        end
-      else
-        preview_file_url
-      end
+      media_asset.variant(:"180x180").file_url
     end
 
     def file_url_for(user)
@@ -209,10 +224,6 @@ class Post < ApplicationRecord
   end
 
   concerning :ImageMethods do
-    def twitter_card_supported?
-      image_width.to_i >= 280 && image_height.to_i >= 150
-    end
-
     def has_large?
       return false if has_tag?("animated_gif") || has_tag?("animated_png")
       return true if is_ugoira?
@@ -350,8 +361,8 @@ class Post < ApplicationRecord
       tags - tags_was
     end
 
-    def decrement_tag_post_counts
-      Tag.where(:name => tag_array).update_all("post_count = post_count - 1") if tag_array.any?
+    def removed_tags
+      tags_was - tags
     end
 
     def update_tag_post_counts
@@ -395,6 +406,18 @@ class Post < ApplicationRecord
       end
 
       @post_edit = PostEdit.new(self, tag_string_was, old_tag_string || tag_string_was, tag_string)
+    end
+
+    # XXX should be a `validate` hook instead of `before_validation` hook
+    def validate_new_tags
+      return if CurrentUser.user.nil? || CurrentUser.user.is_builder?
+
+      new_tags = post_edit.effective_added_tag_names.select { |name| !Tag.exists?(name: name) }
+
+      if RateLimiter.limited?(action: "post:validate_new_tags", user: CurrentUser.user, cost: new_tags.size, rate: MAX_NEW_TAGS.to_f/MAX_NEW_TAGS_INTERVAL, burst: MAX_NEW_TAGS, minimum_points: -0.1)
+        errors.add(:base, "You can't create more than #{MAX_NEW_TAGS.to_i} new tags per #{MAX_NEW_TAGS_INTERVAL.inspect}. Wait a while and try again")
+        throw :abort # XXX This causes a transaction rollback which means the rate limit doesn't get properly updated.
+      end
     end
 
     def normalize_tags
@@ -445,21 +468,24 @@ class Post < ApplicationRecord
         tags << "non-web_source"
       end
 
-      source_url = parsed_source
-      if source_url.present? && source_url.recognized?
-        # A bad_link is an image URL from a recognized site that can't be converted to a page URL.
-        if source_url.image_url? && source_url.page_url.nil?
-          tags << "bad_link"
-        else
-          tags -= ["bad_link"]
-        end
+      # A bad_link is an image URL from a recognized site that can't be converted to a page URL.
+      case parsed_source&.bad_link?
+      when true
+        tags << "bad_link"
+      when false
+        tags -= ["bad_link"]
+      when nil
+        # it's unknown whether it's a bad link or not; don't add or remove the tag
+      end
 
-        # A bad_source is a source from a recognized site that isn't an image url or a page url.
-        if !source_url.image_url? && !source_url.page_url?
-          tags << "bad_source"
-        else
-          tags -= ["bad_source"]
-        end
+      # A bad_source is a source from a recognized site that isn't an image url or a page url.
+      case parsed_source&.bad_source?
+      when true
+        tags << "bad_source"
+      when false
+        tags -= ["bad_source"]
+      when nil
+        # it's unknown whether it's a bad source or not; don't add or remove the tag
       end
 
       # Allow only Flash files to be manually tagged as `animated`; GIFs, PNGs, videos, and ugoiras are automatically tagged.
@@ -472,6 +498,10 @@ class Post < ApplicationRecord
       tags << "exif_rotation" if media_asset.is_rotated?
       tags << "non-repeating_animation" if media_asset.is_non_repeating_animation?
       tags << "ai-generated" if media_asset.is_ai_generated?
+
+      # Allow Flash files to be manually tagged as `sound`; other files are automatically tagged.
+      tags -= ["sound"] unless is_flash?
+      tags << "sound" if media_asset.has_sound?
 
       tags
     end
@@ -613,6 +643,14 @@ class Post < ApplicationRecord
       source.match?(%r{\Ahttps?://}i)
     end
 
+    def file_source?
+      source.starts_with?("file://")
+    end
+
+    def text_source?
+      source.present? && !web_source? && !file_source?
+    end
+
     def has_tag?(tag)
       tag_array.include?(tag)
     end
@@ -691,18 +729,35 @@ class Post < ApplicationRecord
   end
 
   concerning :ParentMethods do
-    # A parent has many children. A child belongs to a parent.
-    # A parent cannot have a parent.
-    #
-    # After expunging a child:
-    # - Move favorites to parent.
-    # - Does the parent have any children?
-    #   - Yes: Done.
-    #   - No: Update parent's has_children flag to false.
-    #
-    # After expunging a parent:
-    # - Move favorites to the first child.
-    # - Reparent all children to the first child.
+    # @return [Array<Post>] The list of this post's ancestors (its parent, grandparent, great-grandparent, etc).
+    def ancestors
+      ancestors = []
+      parent = self.parent
+
+      while parent.present? && !self.in?(ancestors)
+        ancestors << parent
+        parent = parent.parent
+      end
+
+      ancestors
+    end
+
+    # @return [Integer] The total number of levels in the entire parent-child tree. A post with no parent or
+    # children has depth 1; a post with a parent but no children has depth 2; a post with a parent and one level of
+    # children has depth 3; etc.
+    def parent_hierarchy_depth
+      ancestors.size + child_height + 1
+    end
+
+    # @return [Integer] The number of levels of child posts this post has. A post with no children has height 0; a post
+    # with children but no grandchildren has height 1; a post with grandchildren but no great-grandchildren has height 2; etc.
+    def child_height
+      if children.present?
+        children.map(&:child_height).max + 1
+      else
+        0
+      end
+    end
 
     def update_has_children_flag
       update(has_children: children.exists?, has_active_children: children.undeleted.exists?)
@@ -773,10 +828,10 @@ class Post < ApplicationRecord
           ModAction.log("permanently deleted post ##{id} (md5=#{md5})", :post_permanent_delete, subject: nil, user: current_user)
 
           update_children_on_destroy
-          decrement_tag_post_counts
+          Tag.decrement_post_counts(tag_array)
           remove_from_all_pools
           remove_from_fav_groups
-          media_asset.trash!
+          media_asset.trash!(current_user, log: false)
           destroy
           update_parent_on_destroy
         end
@@ -947,26 +1002,32 @@ class Post < ApplicationRecord
 
   concerning :SearchMethods do
     class_methods do
-      # Return a set of up to N random posts. May return less if there aren't
-      # enough posts.
+      # Return a set of up to N random posts. May return less if it can't find enough posts.
       #
-      # @param n [Integer] The maximum number of posts to return
-      # @return [ActiveRecord::Relation<Post>]
-      def random(n = 1)
-        posts = n.times.map do
-          key = SecureRandom.hex(16)
-          random_up(key) || random_down(key)
-        end.compact.uniq
+      # Works by generating N random MD5s and picking the closest post below each MD5 (or above it if there aren't any
+      # posts below it). For small searches, this procedure is noticeably biased. It may return less than N posts and
+      # some posts may be more likely to be returned than others. This is because MD5s aren't evenly distributed for
+      # small searches.
+      #
+      # @param limit [Integer] The maximum number of posts to return.
+      # @return [ActiveRecord::Relation<Post>] The set of random posts.
+      def random(limit = 1)
+        random_md5s = <<~SQL
+          WITH RECURSIVE random_md5s (n, r, md5) AS (
+              SELECT 0, random(), NULL::text
+            UNION ALL
+              SELECT
+                n+1,
+                r+1,
+                (((#{reselect(:md5).where("posts.md5 < md5((n + r)::text)").reorder(md5: :desc).limit(1).to_sql}) UNION ALL
+                  (#{reselect(:md5).where("posts.md5 >= md5((n + r)::text)").reorder(md5: :asc).limit(1).to_sql})) LIMIT 1)
+              FROM random_md5s
+              WHERE n+1 < #{limit + 1}
+          )
+          SELECT DISTINCT md5 FROM random_md5s
+        SQL
 
-        reorder(nil).in_order_of(:id, posts.map(&:id))
-      end
-
-      def random_up(key)
-        where("md5 < ?", key).reorder(md5: :desc).first
-      end
-
-      def random_down(key)
-        where("md5 >= ?", key).reorder(md5: :asc).first
+        where("posts.md5 IN (#{random_md5s})").reorder("random()")
       end
 
       def sample(query, sample_size)
@@ -1056,13 +1117,137 @@ class Post < ApplicationRecord
         from(relation.arel.as("posts"))
       end
 
-      def available_for_moderation(user, hidden: false)
+      def available_for_moderation(user, type)
         disapproved_posts = user.post_disapprovals.select(:post_id)
 
-        if hidden.present?
+        case type.to_s
+        when "seen"
           in_modqueue.where(id: disapproved_posts)
-        else
+        when "unseen"
           in_modqueue.where.not(id: disapproved_posts)
+        else
+          in_modqueue
+        end
+      end
+
+      def metatag_matches(name, value, current_user = User.anonymous, quoted: false)
+        case name
+        when "id"
+          attribute_matches(value, :id)
+        when "md5"
+          attribute_matches(value, :md5, :md5)
+        when "pixelhash"
+          attribute_matches(value, "media_assets.pixel_hash", :md5).joins(:media_asset)
+        when "width"
+          attribute_matches(value, "media_assets.image_width").joins(:media_asset)
+        when "height"
+          attribute_matches(value, "media_assets.image_height").joins(:media_asset)
+        when "mpixels"
+          attribute_matches(value, "(media_assets.image_width * media_assets.image_height) / 1000000.0", :float).joins(:media_asset)
+        when "ratio"
+          attribute_matches(value, "ROUND(media_assets.image_width::numeric / media_assets.image_height::numeric, 2)", :ratio).joins(:media_asset)
+        when "score"
+          attribute_matches(value, :score)
+        when "upvotes"
+          attribute_matches(value, :up_score)
+        when "downvotes"
+          attribute_matches(value, "ABS(posts.down_score)")
+        when "favcount"
+          attribute_matches(value, :fav_count)
+        when "filesize"
+          attribute_matches(value, "media_assets.file_size", :filesize).joins(:media_asset)
+        when "filetype"
+          attribute_matches(value, "media_assets.file_ext", :enum).joins(:media_asset)
+        when "date"
+          attribute_matches(value, :created_at, :date)
+        when "age"
+          attribute_matches(value, :created_at, :age)
+        when "pixiv", "pixiv_id"
+          attribute_matches(value, :pixiv_id)
+        when "tagcount"
+          attribute_matches(value, :tag_count)
+        when "duration"
+          attribute_matches(value, "media_assets.duration", :float).joins(:media_asset)
+        when "is"
+          is_matches(value, current_user)
+        when "has"
+          has_matches(value)
+        when "status"
+          status_matches(value, current_user)
+        when "parent"
+          parent_matches(value)
+        when "child"
+          child_matches(value)
+        when "rating"
+          rating_matches(value)
+        when "embedded"
+          embedded_matches(value)
+        when "source"
+          source_matches(value, quoted)
+        when "disapproved"
+          disapproved_matches(value, current_user)
+        when "commentary"
+          commentary_matches(value, quoted)
+        when "note"
+          note_matches(value)
+        when "comment"
+          comment_matches(value)
+        when "search"
+          saved_search_matches(value, current_user)
+        when "pool"
+          pool_matches(value)
+        when "ordpool"
+          ordpool_matches(value)
+        when "favgroup"
+          favgroup_matches(value, current_user)
+        when "ordfavgroup"
+          ordfavgroup_matches(value, current_user)
+        when "fav"
+          favorites_include(value, current_user)
+        when "ordfav"
+          ordfav_matches(value, current_user)
+        when "reacted"
+          reacted_by(value)
+        when "unaliased"
+          tags_include(value)
+        when "exif"
+          exif_matches(value)
+        when "ai"
+          ai_tags_include(value)
+        when "user"
+          uploader_matches(value)
+        when "approver"
+          approver_matches(value)
+        when "flagger"
+          user_subquery_matches(PostFlag.unscoped.category_matches("normal"), value, current_user)
+        when "appealer"
+          user_subquery_matches(PostAppeal.unscoped, value, current_user)
+        when "commenter", "comm"
+          user_subquery_matches(Comment.unscoped, value, current_user)
+        when "commentaryupdater", "artcomm"
+          user_subquery_matches(ArtistCommentaryVersion.unscoped, value, current_user, field: :updater)
+        when "noter"
+          user_subquery_matches(NoteVersion.unscoped.where(version: 1), value, current_user, field: :updater)
+        when "noteupdater"
+          user_subquery_matches(NoteVersion.unscoped, value, current_user, field: :updater)
+        when "upvoter", "upvote"
+          user_subquery_matches(PostVote.active.positive.visible(current_user), value, current_user, field: :user)
+        when "downvoter", "downvote"
+          user_subquery_matches(PostVote.active.negative.visible(current_user), value, current_user, field: :user)
+        when *PostQueryBuilder::CATEGORY_COUNT_METATAGS
+          short_category = name.delete_suffix("tags")
+          category = TagCategory.short_name_mapping[short_category]
+          attribute_matches(value, :"tag_count_#{category}")
+        when *PostQueryBuilder::COUNT_METATAGS
+          attribute_matches(value, name.to_sym)
+        when "random"
+          all # handled elsewhere
+        when "limit"
+          all
+        when "order"
+          all
+        else
+          raise NotImplementedError, "metatag not implemented"
         end
       end
 
@@ -1072,10 +1257,12 @@ class Post < ApplicationRecord
           where(has_children: true)
         when "child"
           where.not(parent: nil)
+        when "wiki_image"
+          where(id: DtextLink.wiki_page.embedded_post.select("link_target::integer"))
         when *AutocompleteService::POST_STATUSES
           status_matches(value, current_user)
         when *MediaAsset::FILE_TYPES
-          attribute_matches(value, :file_ext, :enum)
+          attribute_matches(value, "media_assets.file_ext", :enum).joins(:media_asset)
         when *Post::RATINGS.values.map(&:downcase)
           rating_matches(value)
         when *Post::RATING_ALIASES.keys
@@ -1129,7 +1316,7 @@ class Post < ApplicationRecord
         when "active"
           active
         when "unmoderated"
-          available_for_moderation(current_user, hidden: false)
+          available_for_moderation(current_user, :unseen)
         when "all", "any"
           where("TRUE")
         else
@@ -1295,18 +1482,18 @@ class Post < ApplicationRecord
         end
       end
 
-      def exif_matches(string)
-        # string = exif:File:ColorComponents=3
-        if string.include?("=")
-          key, value = string.split(/=/, 2)
-          hash = { key => value }
-          metadata = MediaMetadata.joins(:media_asset).where_json_contains(:metadata, hash)
-        # string = exif:File:ColorComponents
-        else
-          metadata = MediaMetadata.joins(:media_asset).where_json_has_key(:metadata, string)
-        end
+      def reacted_by(username)
+        reactor = User.find_by_name(username)
 
-        where(md5: metadata.select(:md5))
+        if reactor.present?
+          where(id: reactor.post_reactions.select(:model_id))
+        else
+          none
+        end
+      end
+
+      def exif_matches(string)
+        joins(:media_asset).merge(MediaAsset.exif_matches(string))
       end
 
       def ai_tags_include(value, default_confidence: ">=50")
@@ -1368,6 +1555,151 @@ class Post < ApplicationRecord
         end
       end
 
+      def order_matches(order)
+        case order.to_s.downcase
+        when "id", "id_asc"
+          reorder("posts.id ASC")
+
+        when "id_desc"
+          reorder("posts.id DESC")
+
+        when "md5", "md5_desc"
+          reorder("posts.md5 DESC")
+
+        when "md5_asc"
+          reorder("posts.md5 ASC")
+
+        when "score", "score_desc"
+          reorder("posts.score DESC, posts.id DESC")
+
+        when "score_asc"
+          reorder("posts.score ASC, posts.id ASC")
+
+        when "upvotes", "upvotes_desc"
+          reorder("posts.up_score DESC, posts.id DESC")
+
+        when "upvotes_asc"
+          reorder("posts.up_score ASC, posts.id ASC")
+
+        # XXX down_score is negative so order:downvotes sorts lowest-to-highest so that most downvoted is first.
+        when "downvotes", "downvotes_desc"
+          reorder("posts.down_score ASC, posts.id ASC")
+
+        when "downvotes_asc"
+          reorder("posts.down_score DESC, posts.id DESC")
+
+        when "favcount"
+          reorder("posts.fav_count DESC, posts.id DESC")
+
+        when "favcount_asc"
+          reorder("posts.fav_count ASC, posts.id ASC")
+
+        when "created_at", "created_at_desc"
+          reorder("posts.created_at DESC")
+
+        when "created_at_asc"
+          reorder("posts.created_at ASC")
+
+        when "change", "change_desc"
+          reorder("posts.updated_at DESC, posts.id DESC")
+
+        when "change_asc"
+          reorder("posts.updated_at ASC, posts.id ASC")
+
+        when "comment", "comm"
+          reorder("posts.last_commented_at DESC NULLS LAST, posts.id DESC")
+
+        when "comment_asc", "comm_asc"
+          reorder("posts.last_commented_at ASC NULLS LAST, posts.id ASC")
+
+        when "comment_bumped"
+          reorder("posts.last_comment_bumped_at DESC NULLS LAST")
+
+        when "comment_bumped_asc"
+          reorder("posts.last_comment_bumped_at ASC NULLS FIRST")
+
+        when "note"
+          reorder("posts.last_noted_at DESC NULLS LAST")
+
+        when "note_asc"
+          reorder("posts.last_noted_at ASC NULLS FIRST")
+
+        when "artcomm"
+          joins(:artist_commentary).reorder("artist_commentaries.updated_at DESC")
+
+        when "artcomm_asc"
+          joins(:artist_commentary).reorder("artist_commentaries.updated_at ASC")
+
+        when "mpixels", "mpixels_desc"
+          # Use "w*h/1000000", even though "w*h" would give the same result, so this can use the posts_mpixels index.
+          joins(:media_asset).reorder(Arel.sql("media_assets.image_width * media_assets.image_height / 1000000.0 DESC"))
+
+        when "mpixels_asc"
+          joins(:media_asset).reorder(Arel.sql("media_assets.image_width * media_assets.image_height / 1000000.0 ASC"))
+
+        when "portrait"
+          joins(:media_asset).reorder(Arel.sql("media_assets.image_width::numeric / media_assets.image_height::numeric ASC"))
+
+        when "landscape"
+          joins(:media_asset).reorder(Arel.sql("media_assets.image_width::numeric / media_assets.image_height::numeric DESC"))
+
+        when "filesize", "filesize_desc"
+          joins(:media_asset).reorder("media_assets.file_size DESC")
+
+        when "filesize_asc"
+          joins(:media_asset).reorder("media_assets.file_size ASC")
+
+        when /\A(?<column>#{PostQueryBuilder::COUNT_METATAGS.join("|")})(_(?<direction>asc|desc))?\z/i
+          column = $~[:column]
+          direction = $~[:direction] || "desc"
+          reorder(column => direction, :id => direction)
+
+        when "tagcount", "tagcount_desc"
+          reorder("posts.tag_count DESC")
+
+        when "tagcount_asc"
+          reorder("posts.tag_count ASC")
+
+        when "duration", "duration_desc"
+          joins(:media_asset).reorder("media_assets.duration DESC NULLS LAST, posts.id DESC")
+
+        when "duration_asc"
+          joins(:media_asset).reorder("media_assets.duration ASC NULLS LAST, posts.id ASC")
+
+        # artags_desc, copytags_desc, chartags_desc, gentags_desc, metatags_desc
+        when /(#{TagCategory.short_name_list.join("|")})tags(?:\Z|_desc)/
+          reorder("posts.tag_count_#{TagCategory.short_name_mapping[$1]} DESC")
+
+        # artags_asc, copytags_asc, chartags_asc, gentags_asc, metatags_asc
+        when /(#{TagCategory.short_name_list.join("|")})tags_asc/
+          reorder("posts.tag_count_#{TagCategory.short_name_mapping[$1]} ASC")
+
+        when "random"
+          reorder("random()")
+
+        when "rank"
+          where("posts.score > 0 and posts.created_at >= ?", 2.days.ago).reorder(Arel.sql("log(3, posts.score) + (extract(epoch from posts.created_at) - extract(epoch from timestamp '2005-05-24')) / 35000 DESC"))
+
+        when "modqueue", "modqueue_desc"
+          with_queued_at.reorder("queued_at DESC, posts.id DESC")
+
+        when "modqueue_asc"
+          with_queued_at.reorder("queued_at ASC, posts.id ASC")
+
+        when "disapproved", "disapproved_desc"
+          group(:id).left_outer_joins(:disapprovals).select("posts.*").select("MAX(post_disapprovals.created_at) AS disapproved_at").reorder("disapproved_at DESC, posts.id DESC")
+
+        when "disapproved_asc"
+          group(:id).left_outer_joins(:disapprovals).select("posts.*").select("MAX(post_disapprovals.created_at) AS disapproved_at").reorder("disapproved_at ASC, posts.id ASC")
+
+        when "none"
+          reorder(nil)
+
+        else
+          reorder("posts.id DESC")
+        end
+      end
+
       def tags_include(*tags)
         where_array_includes_all("string_to_array(posts.tag_string, ' ')", tags)
       end
@@ -1421,7 +1753,7 @@ class Post < ApplicationRecord
         end
 
         if params[:order].present?
-          q = PostQueryBuilder.new(nil).search_order(q, params[:order])
+          q = q.order_matches(params[:order])
         else
           q = q.apply_default_order(params)
         end
@@ -1434,12 +1766,7 @@ class Post < ApplicationRecord
   concerning :PixivMethods do
     def parse_pixiv_id
       self.pixiv_id = nil
-      return unless web_source?
-
-      site = Source::Extractor::Pixiv.new(source)
-      if site.match?
-        self.pixiv_id = site.illust_id
-      end
+      self.pixiv_id = parsed_source.work_id if parsed_source.is_a?(Source::URL::Pixiv)
     end
   end
 
@@ -1454,61 +1781,73 @@ class Post < ApplicationRecord
 
         ModAction.log("regenerated IQDB for post ##{id}", :post_regenerate_iqdb, subject: self, user: user)
       else
-        media_file = media_asset.variant(:original).open_file
-        media_asset.distribute_files!(media_file)
-
-        update!(
-          image_width: media_file.width,
-          image_height: media_file.height,
-          file_size: media_file.file_size,
-          file_ext: media_file.file_ext
-        )
-
-        media_asset.update!(
-          image_width: media_file.width,
-          image_height: media_file.height,
-          file_size: media_file.file_size,
-          file_ext: media_file.file_ext
-        )
-
-        purge_cached_urls!
-        update_iqdb
+        media_asset.regenerate!
 
         ModAction.log("regenerated image samples for post ##{id}", :post_regenerate, subject: self, user: user)
       end
-    end
-
-    def purge_cached_urls!
-      urls = [
-        preview_file_url, large_file_url, file_url,
-        tagged_file_url(tagged_filenames: true), tagged_large_file_url(tagged_filenames: true),
-      ]
-
-      CloudflareService.new.purge_cache(urls)
     end
   end
 
   concerning :IqdbMethods do
     def update_iqdb
       # performs IqdbClient.new.add_post(post)
-      IqdbAddPostJob.perform_later(self)
+      IqdbAddPostJob.perform_later(self) if IqdbClient.new.enabled?
     end
 
     def remove_iqdb
       # performs IqdbClient.new.remove(id)
-      IqdbRemovePostJob.perform_later(id)
+      IqdbRemovePostJob.perform_later(id) if IqdbClient.new.enabled?
     end
   end
 
   concerning :ValidationMethods do
-    def post_is_not_its_own_parent
-      if !new_record? && id == parent_id
+    def validate_no_parent_cycles
+      return unless parent_id_changed?
+
+      if self.in?(ancestors)
         errors.add(:base, "Post cannot have itself as a parent")
+        throw :abort # Abort to avoid additional error about parent-child chain being more than 4 levels deep
+      end
+    end
+
+    def validate_parent_depth
+      return unless parent_id_changed?
+
+      if parent_hierarchy_depth > MAX_PARENT_DEPTH
+        errors.add(:base, "Post cannot have a parent-child chain more than #{MAX_PARENT_DEPTH} levels deep")
+      end
+    end
+
+    def validate_child_count
+      return unless parent_id_changed? && parent.present?
+
+      if parent.children.count >= MAX_CHILD_POSTS
+        errors.add(:base, "post ##{parent_id} cannot have more than #{MAX_CHILD_POSTS} child posts")
       end
     end
 
     def uploader_is_not_limited
-      errors.add(:uploader, "have reached your upload limit") if uploader.upload_limit.limited?
+      if uploader.upload_limit.limited?
+        errors.add(:uploader, "have reached your upload limit. Please wait for your pending uploads to be approved before uploading more")
+        throw :abort # Don't bother returning other validation errors if we're upload-limited.
+      end
+    end
+
+    def validate_changed_tags
+      return if CurrentUser.user.nil? || uploader == CurrentUser.user || CurrentUser.user.is_builder?
+
+      changed_tags = added_tags + removed_tags
+
+      if RateLimiter.limited?(action: "post:validate_changed_tags", user: CurrentUser.user, cost: changed_tags.size, rate: MAX_CHANGED_TAGS.to_f/MAX_CHANGED_TAGS_INTERVAL, burst: MAX_CHANGED_TAGS, minimum_points: -0.1)
+        errors.add(:base, "You can't add or remove more than #{MAX_CHANGED_TAGS.to_i} tags per #{MAX_CHANGED_TAGS_INTERVAL.inspect}. Wait a while and try again")
+        throw :abort
+      end
+    end
+
+    def validate_tag_count
+      if tag_array.size > MAX_TAG_COUNT
+        errors.add(:base, "Post cannot have more than #{MAX_TAG_COUNT} tags")
+      end
     end
 
     def added_tags_are_valid
@@ -1607,7 +1946,11 @@ class Post < ApplicationRecord
   end
 
   def self.normalize_source(source)
-    source.to_s.strip.unicode_normalize(:nfc)
+    if source&.match?(%r{\Ahttps?://}i)
+      source.to_s
+    else
+      source.to_s.strip.unicode_normalize(:nfc)
+    end
   end
 
   def mark_as_translated(params)
@@ -1637,7 +1980,8 @@ class Post < ApplicationRecord
     %i[
       uploader approver flags appeals events parent children notes
       comments approvals disapprovals replacements
-      artist_commentary media_asset media_metadata ai_tags
+      artist_commentary media_asset media_metadata ai_tags dtext_links
+      embedding_wiki_pages
     ]
   end
 end

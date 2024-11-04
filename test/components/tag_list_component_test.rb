@@ -11,14 +11,6 @@ class TagListComponentTest < ViewComponent::TestCase
       @tags = Tag.all
     end
 
-    context "for a related tag list" do
-      should "render" do
-        render_inline(RelatedTagListComponent.new(tags: @tags))
-
-        assert_css(".simple-tag-list a.search-tag", count: 5)
-      end
-    end
-
     context "for an inline tag list" do
       should "render" do
         render_inline(InlineTagListComponent.new(tags: @tags))
@@ -28,20 +20,10 @@ class TagListComponentTest < ViewComponent::TestCase
     end
 
     context "for a search tag list" do
-      context "with +/- links" do
-        should "render" do
-          render_inline(SearchTagListComponent.new(tags: @tags, current_query: "touhou", show_extra_links: true))
+      should "render" do
+        render_inline(SearchTagListComponent.new(tags: @tags, current_query: "touhou"))
 
-          assert_css(".search-tag-list li a.search-tag", count: 5)
-        end
-      end
-
-      context "without +/- links" do
-        should "render" do
-          render_inline(SearchTagListComponent.new(tags: @tags))
-
-          assert_css(".search-tag-list li a.search-tag", count: 5)
-        end
+        assert_css(".search-tag-list li a.search-tag", count: 5)
       end
     end
 

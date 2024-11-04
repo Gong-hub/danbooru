@@ -11,7 +11,7 @@ class SavedSearch < ApplicationRecord
   normalize :query, :normalize_query
   normalize :labels, :normalize_labels
 
-  validates :query, presence: true
+  validates :query, visible_string: true
   validate :validate_count, on: :create
 
   scope :labeled, ->(label) { where_array_includes_any_lower(:labels, [normalize_label(label)]) }
@@ -162,9 +162,10 @@ class SavedSearch < ApplicationRecord
 
       def rewrite_queries!(old_name, new_name)
         has_tag(old_name).find_each do |ss|
-          ss.lock!
-          ss.rewrite_query(old_name, new_name)
-          ss.save!
+          ss.with_lock do
+            ss.rewrite_query(old_name, new_name)
+            ss.save!
+          end
         end
       end
     end

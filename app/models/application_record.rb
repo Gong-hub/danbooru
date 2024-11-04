@@ -6,6 +6,7 @@ class ApplicationRecord < ActiveRecord::Base
   include Deletable
   include Mentionable
   include Normalizable
+  include DTextAttribute
   include ArrayAttribute
   include HasDtextLinks
   extend HasBitFlags
@@ -135,27 +136,27 @@ class ApplicationRecord < ActiveRecord::Base
   concerning :ActiveRecordExtensions do
     class_methods do
       def set_timeout(n)
-        connection.execute("SET STATEMENT_TIMEOUT = #{n}") unless Rails.env.test?
+        connection.execute("SET statement_timeout = #{n}") unless Rails.env.test?
         yield
       ensure
-        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.statement_timeout}") unless Rails.env.test?
+        connection.execute("SET statement_timeout = #{CurrentUser.user.statement_timeout}") unless Rails.env.test?
       end
 
       def without_timeout
-        connection.execute("SET STATEMENT_TIMEOUT = 0") unless Rails.env.test?
+        connection.execute("SET statement_timeout = 0") unless Rails.env.test?
         yield
       ensure
-        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
+        connection.execute("SET statement_timeout = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
       end
 
       def with_timeout(n, default_value = nil, new_relic_params = {})
-        connection.execute("SET STATEMENT_TIMEOUT = #{n}") unless Rails.env.test?
+        connection.execute("SET statement_timeout = #{n}") unless Rails.env.test?
         yield
       rescue ::ActiveRecord::StatementInvalid => e
         DanbooruLogger.log(e, expected: true, **new_relic_params)
         default_value
       ensure
-        connection.execute("SET STATEMENT_TIMEOUT = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
+        connection.execute("SET statement_timeout = #{CurrentUser.user.try(:statement_timeout) || 3_000}") unless Rails.env.test?
       end
 
       def update!(*args)
@@ -218,23 +219,15 @@ class ApplicationRecord < ActiveRecord::Base
 
   concerning :ConcurrencyMethods do
     class_methods do
-      def parallel_each(batch_size: 1000, in_processes: 4, in_threads: nil, &block)
+      def parallel_find_each(**options, &block)
         # XXX We may deadlock if a transaction is open; do a non-parallel each.
         return find_each(&block) if connection.transaction_open?
 
-        # XXX Use threads in testing because processes can't see each other's
-        # database transactions.
-        if Rails.env.test?
-          in_processes = nil
-          in_threads = 2
-        end
-
         current_user = CurrentUser.user
 
-        find_in_batches(batch_size: batch_size, error_on_ignore: true) do |batch|
-          Parallel.each(batch, in_processes: in_processes, in_threads: in_threads) do |record|
-            # XXX In threaded mode, the current user isn't inherited from the
-            # parent thread because the current user is a thread-local
+        find_in_batches(error_on_ignore: true, **options) do |batch|
+          batch.parallel_each do |record|
+            # XXX The current user isn't inherited from the parent thread because the current user is a thread-local
             # variable. Hence, we have to set it explicitly in the child thread.
             CurrentUser.scoped(current_user) do
               yield record

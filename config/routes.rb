@@ -22,7 +22,6 @@ Rails.application.routes.draw do
     resources :users, :only => [:edit, :update]
   end
   namespace :moderator do
-    resource :dashboard, :only => [:show]
     namespace :post do
       resources :posts, :only => [:delete, :expunge, :confirm_delete] do
         member do
@@ -39,7 +38,6 @@ Rails.application.routes.draw do
     resources :posts, :only => [] do
       collection do
         get :popular
-        get :curated
         get :viewed
         get :searches
         get :missed_searches
@@ -50,7 +48,6 @@ Rails.application.routes.draw do
     namespace :user do
       resource :count_fixes, only: [:new, :create]
       resource :email_notification, only: [:show, :create, :destroy]
-      resource :deletion, :only => [:show, :destroy]
     end
   end
 
@@ -68,11 +65,7 @@ Rails.application.routes.draw do
     end
   end
   resources :artist_urls, only: [:index]
-  resources :artist_versions, :only => [:index, :show] do
-    collection do
-      get :search
-    end
-  end
+  resources :artist_versions, only: [:index, :show]
   resources :bans
   resources :bulk_update_requests do
     member do
@@ -146,15 +139,20 @@ Rails.application.routes.draw do
       get :check, to: redirect {|path_params, req| "/iqdb_queries?#{req.query_string}"}
     end
   end
-  resources :media_assets, only: [:index, :show] do
+  resources :media_assets, only: [:index, :show, :destroy] do
     get "/:variant", to: "media_assets#image", as: :image
   end
   resources :media_metadata, only: [:index]
+
+  resources :metrics, only: [:index], defaults: { format: :text } do
+    get "/instance", on: :collection, to: "metrics#instance", as: :instance
+  end
 
   resources :ai_tags, only: [:index]
   put "/ai_tags/:media_asset_id/:tag_id/tag", to: "ai_tags#tag", as: "tag_ai_tag"
 
   resources :mod_actions
+  get "/moderator/dashboard" => "moderator_dashboard#show"
   resources :moderation_reports, only: [:new, :create, :index, :show, :update]
   resources :modqueue, only: [:index]
   resources :news_updates
@@ -165,7 +163,8 @@ Rails.application.routes.draw do
   end
   resources :note_versions, :only => [:index, :show]
   resource :note_previews, only: [:create, :show]
-  resource :password_reset, only: [:create, :show]
+  resource :password_reset, only: [:create, :show, :edit, :update]
+  resource :password, only: [:edit, :update]
   resources :pools do
     member do
       put :revert
@@ -230,14 +229,16 @@ Rails.application.routes.draw do
   end
   resources :artist_commentary_versions, :only => [:index, :show]
   resources :rate_limits, only: [:index]
+  resources :reactions, only: [:index, :show, :create, :destroy]
   resource :related_tag, :only => [:show, :update]
   resources :recommended_posts, only: [:index]
   resources :reports, only: [:index, :show]
   resources :robots, only: [:index]
   resources :saved_searches, :except => [:show]
   resource :session, only: [:new, :create, :destroy] do
+    post :verify_totp, on: :collection
+    post :reauthenticate, on: :collection
     get :confirm_password, on: :collection
-    get :sign_out, on: :collection
   end
   resource :source, :only => [:show]
   resource :status, only: [:show], controller: "status"
@@ -269,11 +270,16 @@ Rails.application.routes.draw do
       post :send_confirmation
     end
     resource :password, only: [:edit, :update]
+    resource :totp, only: [:edit, :update, :destroy]
+    resources :backup_codes, only: [:index, :create]
     resources :api_keys, only: [:new, :create, :edit, :update, :index, :destroy]
     resources :uploads, only: [:index]
+    resources :user_events, only: [:index], path: "events"
 
     get :change_name, on: :member, to: "user_name_change_requests#new"
     get :custom_style, on: :collection
+    get :deactivate, on: :member     # /users/:id/deactivate
+    get :deactivate, on: :collection # /users/deactivate
   end
   get "/upgrade", to: "user_upgrades#new", as: "new_user_upgrade"
   get "/user_upgrades/new", to: redirect("/upgrade")
@@ -333,10 +339,13 @@ Rails.application.routes.draw do
   get "/help/:title" => redirect {|params, req| "/wiki_pages?title=#{CGI.escape('help:' + req.params[:title])}"}
 
   get "/login", to: "sessions#new", as: :login
-  get "/logout", to: "sessions#sign_out", as: :logout
+  get "/logout", to: "sessions#logout", as: :logout
   get "/profile", to: "users#profile", as: :profile
   get "/settings", to: "users#settings", as: :settings
 
+  get "/up" => "health#show", as: :rails_health_check
+  get "/up/postgres" => "health#postgres"
+  get "/up/redis" => "health#redis"
   get "/sitemap" => "static#sitemap_index"
   get "/opensearch" => "static#opensearch", :as => "opensearch"
   get "/privacy" => "static#privacy_policy", :as => "privacy_policy"
@@ -344,6 +353,7 @@ Rails.application.routes.draw do
   get "/404" => "static#not_found", :as => "not_found"
   get "/2257" => "static#2257", :as => "usc_2257"
   get "/contact" => "static#contact", :as => "contact"
+  get "/.well-known/change-password", to: redirect("/password/edit", status: 302)
 
   get "/static/keyboard_shortcuts" => "static#keyboard_shortcuts", :as => "keyboard_shortcuts"
   get "/static/bookmarklet" => "static#bookmarklet", :as => "bookmarklet"
@@ -354,6 +364,7 @@ Rails.application.routes.draw do
   get "/static/contact", to: redirect("/contact")
   get "/user_upgrade/new", to: redirect("/upgrade")
   get "/delayed_jobs", to: redirect("/jobs")
+  get "/maintenance/user/deletion", to: redirect("/users/deactivate")
 
   get "/mock/recommender/recommend/:user_id" => "mock_services#recommender_recommend", as: "mock_recommender_recommend"
   get "/mock/recommender/similiar/:post_id" => "mock_services#recommender_similar", as: "mock_recommender_similar"
@@ -364,5 +375,6 @@ Rails.application.routes.draw do
   post "/mock/iqdb/query" => "mock_services#iqdb_query"
   get "/mock/autotagger/evaluate" => "mock_services#autotagger_evaluate", as: "mock_autotagger_evaluate"
 
+  match "/", to: "static#not_found", via: %i[post put patch delete trace]
   match "*other", to: "static#not_found", via: :all
 end

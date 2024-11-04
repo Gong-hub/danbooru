@@ -3,10 +3,6 @@
 # @see Source::URL::Anifty
 class Source::Extractor
   class Anifty < Source::Extractor
-    def match?
-      Source::URL::Anifty === parsed_url
-    end
-
     def image_urls
       if parsed_url.image_url?
         [parsed_url.full_image_url].compact
@@ -16,7 +12,7 @@ class Source::Extractor
     end
 
     def profile_url
-      if artist_name.present?
+      if username.present?
         "https://anifty.jp/@#{username}"
       else
         parsed_url.profile_url || parsed_referer&.profile_url
@@ -24,21 +20,15 @@ class Source::Extractor
     end
 
     def username
-      api_response.dig("creator", "userName") || artist_api_response["userName"]
+      api_response.dig("creator", "userName") || artist_api_response["userName"] || parsed_url.username || parsed_referer&.username
     end
 
-    def artist_name
-      api_response.dig("creator", "displayName") || artist_api_response.dig("createdTokens", 0, "creatorProfile", "displayNameEN")
+    def display_name
+      api_response.dig("creator", "displayName") || artist_api_response.dig("creatorProfile", "nameEN")
     end
 
     def other_names
-      other_names = [username]
-      if api_response.present?
-        other_names << api_response.dig("creator", "displayNameJA")
-      elsif artist_api_response
-        other_names << artist_api_response.dig("createdTokens", 0, "creatorProfile", "displayNameJP")
-      end
-      other_names.compact.uniq
+      [display_name, username, api_response.dig("creator", "displayNameJA"), artist_api_response.dig("creatorProfile", "nameJA")].compact_blank.uniq(&:downcase)
     end
 
     def artist_commentary_title
@@ -87,24 +77,16 @@ class Source::Extractor
       parsed_url.artist_hash || parsed_referer&.artist_hash
     end
 
-    def api_response
+    memoize def api_response
       return {} if work_id.blank?
 
-      resp = http.cache(1.minute).get("https://asia-northeast1-anifty-59655.cloudfunctions.net/api/v2/creations/#{work_id}")
-      return {} if resp.code != 200
-
-      resp.parse.with_indifferent_access
+      http.cache(1.minute).parsed_get("https://asia-northeast1-anifty-59655.cloudfunctions.net/api/v2/creations/#{work_id}") || {}
     end
-    memoize :api_response
 
-    def artist_api_response
+    memoize def artist_api_response
       return {} if artist_hash.blank?
 
-      resp = http.cache(1.minute).get("https://asia-northeast1-anifty-59655.cloudfunctions.net/api/users/#{artist_hash}")
-      return {} if resp.code != 200
-
-      resp.parse.with_indifferent_access
+      http.cache(1.minute).parsed_get("https://asia-northeast1-anifty-59655.cloudfunctions.net/api/users/#{artist_hash}") || {}
     end
-    memoize :artist_api_response
   end
 end

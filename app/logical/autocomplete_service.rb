@@ -13,7 +13,7 @@ class AutocompleteService
   POST_STATUSES = %w[active deleted pending flagged appealed banned modqueue unmoderated]
 
   STATIC_METATAGS = {
-    is: %w[parent child sfw nsfw] + POST_STATUSES + MediaAsset::FILE_TYPES + Post::RATINGS.values.map(&:downcase),
+    is: %w[parent child sfw nsfw wiki_image] + POST_STATUSES + MediaAsset::FILE_TYPES + Post::RATINGS.values.map(&:downcase),
     has: %w[parent children source appeals flags replacements comments commentary notes pools],
     status: %w[any] + POST_STATUSES,
     child: %w[any none] + POST_STATUSES,
@@ -74,6 +74,8 @@ class AutocompleteService
       autocomplete_user(query)
     when :mention
       autocomplete_mention(query)
+    when :emoji
+      autocomplete_emoji(query)
     when :pool
       autocomplete_pool(query)
     when :favorite_group
@@ -175,7 +177,7 @@ class AutocompleteService
   # @param string [String] the string to complete
   # @return [Array<Hash>] the autocomplete results
   def tag_prefix_matches(string)
-    tag_wildcard_matches(string + "*")
+    tag_wildcard_matches(string.escape_wildcards + "*")
   end
 
   # Find tags or tag aliases matching a wildcard search.
@@ -371,6 +373,27 @@ class AutocompleteService
     end
   end
 
+  # Complete an emoji reference (e.g. `:smile:`).
+
+  # @param string [String] The name of the emoji (e.g. `smile`, not `:smile:`)
+  # @return [Array<Hash>] the autocomplete results
+  def autocomplete_emoji(emoji)
+    normalized_emoji = emoji.downcase.chomp(":")
+    emojis = Danbooru.config.dtext_emojis.keys
+
+    results = emojis.grep(/#{normalized_emoji}/i).sort_by do |match|
+      exact = match.casecmp?(normalized_emoji) ? 1 : 0
+      prefix = match.downcase.starts_with?(normalized_emoji) ? 1 : 0
+
+      # Sort exact name matches first, then prefix matches, then sort by name.
+      [-exact, -prefix, match]
+    end.take(limit)
+
+    results.map do |v|
+      { type: "emoji", label: ":#{v}:", value: ":#{v}:" }
+    end
+  end
+
   # Complete a search typed in the browser address bar.
   # @param string [String] the name of the tag
   # @return [Array<(String, [Array<String>])>] the autocomplete results
@@ -384,7 +407,9 @@ class AutocompleteService
   # How long autocomplete results can be cached. Cache short result lists (<10
   # results) for less time because they're more likely to change.
   def cache_duration
-    if autocomplete_results.size == limit
+    if type == :emoji
+      5.minutes
+    elsif autocomplete_results.size == limit
       24.hours
     else
       1.hour
@@ -396,7 +421,7 @@ class AutocompleteService
   def cache_publicly?
     if type == :tag_query && parsed_query.tag_names.one?
       true
-    elsif type.in?(%i[tag artist wiki_page pool opensearch])
+    elsif type.in?(%i[tag artist wiki_page pool emoji opensearch])
       true
     else
       false

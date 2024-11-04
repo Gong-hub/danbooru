@@ -36,8 +36,8 @@ class Artist < ApplicationRecord
     extend ActiveSupport::Concern
 
     def sorted_urls
-      urls.sort_by do |url|
-        [url.is_active? ? 0 : 1, url.priority, url.domain, url.secondary_url? ? 1 : 0, url.url]
+      Danbooru.natural_sort_by(urls, &:url).sort_by.with_index do |url, i|
+        [url.is_active? ? 0 : 1, url.priority, url.domain, url.secondary_url? ? 1 : 0, i]
       end
     end
 
@@ -193,33 +193,28 @@ class Artist < ApplicationRecord
   end
 
   module BanMethods
-    def unban!(current_user = CurrentUser.user)
-      Post.transaction do
-        ti = TagImplication.find_by(antecedent_name: name, consequent_name: "banned_artist")
-        ti&.destroy
+    def unban!(current_user)
+      with_lock do
+        ti = TagImplication.active.find_by(antecedent_name: name, consequent_name: "banned_artist")
+        ti&.update!(status: "deleted")
 
-        Post.raw_tag_match(name).find_each do |post|
-          post.unban!(current_user)
-          fixed_tags = post.tag_string.sub(/(?:\A| )banned_artist(?:\Z| )/, " ").strip
-          post.update(tag_string: fixed_tags) # XXX should use current_user
-        end
+        BulkUpdateRequestProcessor.mass_update(name, "-status:banned -banned_artist", user: current_user)
 
-        update!(is_banned: false) # XXX should use current_user
+        CurrentUser.scoped(current_user) { update!(is_banned: false) }
         ModAction.log("unbanned artist ##{id}", :artist_unban, subject: self, user: current_user)
       end
     end
 
-    def ban!(banner: CurrentUser.user)
-      Post.transaction do
-        Post.raw_tag_match(name).each { |post| post.ban!(banner) }
+    def ban!(banner)
+      with_lock do
+        BulkUpdateRequestProcessor.mass_update(name, "status:banned", user: banner)
 
-        # potential race condition but unlikely
-        unless TagImplication.where(:antecedent_name => name, :consequent_name => "banned_artist").exists?
+        unless TagImplication.active.exists?(antecedent_name: name, consequent_name: "banned_artist")
           Tag.find_or_create_by_name("banned_artist", category: "artist", current_user: banner)
           TagImplication.approve!(antecedent_name: name, consequent_name: "banned_artist", approver: banner)
         end
 
-        update!(is_banned: true)
+        CurrentUser.scoped(banner) { update!(is_banned: true) }
         ModAction.log("banned artist ##{id}", :artist_ban, subject: self, user: banner)
       end
     end
@@ -235,16 +230,18 @@ class Artist < ApplicationRecord
     end
 
     def any_other_name_like(name)
-      where(id: Artist.from("unnest(other_names) AS other_name").where_like("other_name", name))
+      where(id: Artist.from("unnest(other_names) AS other_name").where_ilike("other_name", name))
     end
 
     def any_name_matches(query)
       if query =~ %r{\A/(.*)/\z}
         where_regex(:name, $1).or(any_other_name_matches($1)).or(where_regex(:group_name, $1))
+      elsif query.include?("*")
+        normalized_name = normalize_name(query)
+        where_ilike(:name, normalized_name).or(any_other_name_like(normalized_name)).or(where_ilike(:group_name, normalized_name))
       else
         normalized_name = normalize_name(query)
-        normalized_name = "*#{normalized_name}*" unless normalized_name.include?("*")
-        where_like(:name, normalized_name).or(any_other_name_like(normalized_name)).or(where_like(:group_name, normalized_name))
+        where_array_includes_any("lower(ARRAY[artists.name, artists.group_name]::text[] || artists.other_names)", [normalized_name])
       end
     end
 
@@ -261,11 +258,14 @@ class Artist < ApplicationRecord
       query = query.strip
 
       if query =~ %r{\Ahttps?://}i
-        url = Source::Extractor.find(query).profile_url || query
-        ArtistFinder.find_artists(url)
+        Source::Extractor.find(query).artists
       else
         where(id: ArtistURL.url_matches(query).select(:artist_id))
       end
+    end
+
+    def has_normalized_url(urls)
+      where(id: ArtistURL.normalized_url_equals_any(urls).select(:artist_id))
     end
 
     def any_name_or_url_matches(query)
