@@ -1,8 +1,27 @@
 # frozen_string_literal: true
 
+require_relative "../../app/logical/danbooru"
+require_relative "../../app/logical/danbooru/enumerable"
+
 module Danbooru
   module Extensions
     module String
+      # https://invisible-characters.com
+      # https://character.construction/blanks
+      # https://www.unicode.org/review/pr-5.html (5.22 Default Ignorable Code Points)
+      # https://en.wikipedia.org/wiki/Whitespace_character
+      #
+      # [[:space:]] = https://codepoints.net/search?gc[]=Z (Space_Separator | Line_Separator | Paragraph_Separator | U+0009 | U+000A | U+000B | U+000C | U+000D | U+0085)
+      # \p{di} = https://codepoints.net/search?DI=1 (Default_Ignorable_Code_Point)
+      # \u2800 = https://codepoints.net/U+2800 (BRAILLE PATTERN BLANK)
+      INVISIBLE_REGEX = /\A[[:space:]\p{di}\u2800]*\z/
+
+      # Returns true if the string consists entirely of invisible characters. Like `#blank?`, but includes control
+      # characters and certain other invisible Unicode characters that aren't classified as spaces.
+      def invisible?
+        match?(INVISIBLE_REGEX)
+      end
+
       def to_escaped_for_sql_like
         string = self.gsub(/%|_|\*|\\\*|\\\\|\\/) do |str|
           case str
@@ -20,7 +39,7 @@ module Danbooru
 
       # escape \ and * characters so that they're treated literally in LIKE searches.
       def escape_wildcards
-        gsub(/\\/, '\\\\').gsub(/\*/, '\*')
+        gsub("\\", "\\\\\\").gsub("*", '\*')
       end
 
       def to_escaped_for_tsquery_split
@@ -39,23 +58,63 @@ module Danbooru
         self.match?(/\A(false|f|no|n|off|0)\z/i)
       end
 
+      # Do a case-insensitive wildcard match against `pattern`. The `*` character is treated as a wildcard, `\*` is
+      # treated as a literal `*`, and `\\` is treated as a literal `\`.
       def ilike?(pattern)
-        pattern = Regexp.escape(pattern).gsub(/\\\*/, ".*")
+        return casecmp?(pattern) unless pattern.include?("*")
+
+        pattern = Regexp.escape(pattern).gsub(/\\\*|\\\\\*|\\\\\\\\/) do |str|
+          case str
+          when '\*'       then ".*"
+          when '\\\*'     then '\\\*'
+          when "\\\\\\\\" then "\\\\"
+          end
+        end
+
         match?(/\A#{pattern}\z/i)
       end
 
-      def normalize_whitespace
-        # Normalize various horizontal space characters to ASCII space.
-        text = gsub(/\p{Zs}|\t/, " ")
+      # Normalize horizontal and vertical whitespace characters, and strip zero-width space characters.
+      #
+      # https://en.wikipedia.org/wiki/Whitespace_character
+      def normalize_whitespace(eol: "\r\n")
+        strip_zwsp.normalize_spaces.normalize_eol(eol)
+      end
 
-        # Strip various zero width space characters. Zero width joiner (200D)
-        # is allowed because it's used in emoji.
-        text = text.gsub(/[\u180E\u200B\u200C\u2060\uFEFF]/, "")
+      # Strip various zero-width space characters. Zero-width joiner (200D) is allowed because it's used in emoji.
+      def strip_zwsp
+        gsub(/[\u180E\u200B\u200C\u2060\uFEFF]/, "")
+      end
 
-        # Normalize various line ending characters to CRLF.
-        text = text.gsub(/\r?\n|\r|\v|\f|\u0085|\u2028|\u2029/, "\r\n")
+      # Normalize various horizontal space characters to ASCII space.
+      def normalize_spaces
+        gsub(/\p{Zs}|\t/, " ")
+      end
 
-        text
+      # Normalize various line ending characters to CRLF.
+      def normalize_eol(eol = "\r\n")
+        gsub(/\r?\n|\r|\v|\f|\u0085|\u2028|\u2029/, eol)
+      end
+
+      # Capitalize every word in the string. Like `titleize`, but doesn't remove underscores, apply inflection rules, or strip the `_id` suffix.
+      #
+      # @return [String] The string with every word capitalized.
+      def startcase
+        self.gsub(/(?<![a-z'])([a-z]+)/i, &:capitalize)
+      end
+
+      # Parse a JSON string into a Ruby object.
+      #
+      # @return [Object, nil] The JSON object, or nil if the string was blank or there was a syntax error.
+      def parse_json
+        Danbooru::JSON.parse(self)
+      end
+
+      # Parse a string containing HTML into a HTML object.
+      #
+      # @return [Nokogiri::HTML5::DocumentFragment] The HTML object.
+      def parse_html(max_errors: -1, max_tree_depth: -1)
+        Nokogiri::HTML5.fragment(self, max_errors:, max_tree_depth:)
       end
 
       # @return [Boolean] True if the string contains only balanced parentheses; false if the string contains unbalanced parentheses.
@@ -79,6 +138,10 @@ end
 
 class String
   include Danbooru::Extensions::String
+end
+
+module Enumerable
+  include Danbooru::Enumerable
 end
 
 module MimeNegotationExtension

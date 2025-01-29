@@ -9,12 +9,35 @@ class SourcesControllerTest < ActionDispatch::IntegrationTest
       end
 
       should "work for a direct twitter URL with referer" do
-        skip "Twitter keys are not set" if !Danbooru.config.twitter_api_key
         get source_path, params: {
           url: "https://pbs.twimg.com/media/B4HSEP5CUAA4xyu.png:large",
           ref: "https://twitter.com/nounproject/status/540944400767922176",
-          format: "json"
+          format: "json",
         }
+
+        assert_response :success
+      end
+
+      should "work for a HTML response without a URL" do
+        get source_path
+
+        assert_response :success
+      end
+
+      should "work for a HTML response with a URL" do
+        get source_path, params: { url: "https://twitter.com/ttguweiz/status/1794358058526892509" }
+
+        assert_response :success
+      end
+
+      should "work for a HTML response with mode=json" do
+        get source_path, params: { url: "https://twitter.com/ttguweiz/status/1794358058526892509", mode: "json" }
+
+        assert_response :success
+      end
+
+      should "work for a HTML response with mode=test" do
+        get source_path, params: { url: "https://twitter.com/ttguweiz/status/1794358058526892509", mode: "test" }
 
         assert_response :success
       end

@@ -25,7 +25,7 @@ Autocomplete.initialize_all = function() {
   });
 
   this.initialize_tag_autocomplete();
-  this.initialize_mention_autocomplete($("form div.input.dtext textarea"));
+  this.initialize_dtext_autocomplete($("form div.input.dtext textarea"));
   this.initialize_fields($('[data-autocomplete="tag"]'), "tag");
   this.initialize_fields($('[data-autocomplete="artist"]'), "artist");
   this.initialize_fields($('[data-autocomplete="pool"]'), "pool");
@@ -37,6 +37,10 @@ Autocomplete.initialize_all = function() {
 
 Autocomplete.initialize_fields = function($fields, type) {
   $fields.autocomplete({
+    select: function(event, ui) {
+      Autocomplete.insert_completion(this, ui.item.value);
+      return false;
+    },
     source: async function(request, respond) {
       let results = await Autocomplete.autocomplete_source(request.term, type);
       respond(results);
@@ -44,34 +48,33 @@ Autocomplete.initialize_fields = function($fields, type) {
   });
 };
 
-Autocomplete.initialize_mention_autocomplete = function($fields) {
+// Autocomplete @-mentions and :emoji: references in DText.
+Autocomplete.initialize_dtext_autocomplete = function($fields) {
   $fields.autocomplete({
     select: function(event, ui) {
       Autocomplete.insert_completion(this, ui.item.value);
       return false;
     },
+    position: {
+      at: "left top",
+      my: "left bottom"
+    },
     source: async function(req, resp) {
       var cursor = this.element.get(0).selectionStart;
-      var name = null;
+      let match = req.term.substring(0, cursor).match(/([ \r\n/"\\()[\]{}<>]|^)([@:])(\S*)$/);
 
-      for (var i = cursor; i >= 1; --i) {
-        if (req.term[i - 1] === " ") {
-          return;
-        }
+      let prefix = match?.[1];
+      let type = match?.[2];
+      let name = match?.[3];
 
-        if (req.term[i - 1] === "@") {
-          if (i === 1 || /[ \r\n]/.test(req.term[i - 2])) {
-            name = req.term.substring(i, cursor);
-            break;
-          } else {
-            return;
-          }
-        }
-      }
-
-      if (name) {
+      if (type === "@") {
         let results = await Autocomplete.autocomplete_source(name, "mention");
         resp(results);
+      } else if (type === ":") {
+        let results = await Autocomplete.autocomplete_source(name, "emoji", { limit: 50, allowEmpty: true });
+        resp(results);
+      } else {
+        resp([]);
       }
     }
   });
@@ -113,6 +116,9 @@ Autocomplete.insert_completion = function(input, completion) {
 
   input.value = before_caret_text + after_caret_text;
   input.selectionStart = input.selectionEnd = before_caret_text.length;
+
+  $(input).trigger("input"); // Manually trigger an input event because programmatically editing the field won't trigger one.
+  $(() => $(input).autocomplete("instance").close()); // XXX Hack to close the autocomplete menu after the input event above retriggers it
 };
 
 // If we press tab while the autocomplete menu is open but nothing is
@@ -131,7 +137,6 @@ Autocomplete.on_tab = function(event) {
     var completion = $first_item.data().uiAutocompleteItem.value;
 
     Autocomplete.insert_completion(input, completion);
-    autocomplete.close();
   }
 
   // Prevent the tab key from moving focus to the next element.
@@ -143,8 +148,8 @@ Autocomplete.render_item = function(list, item) {
   return list.append(item.html);
 };
 
-Autocomplete.autocomplete_source = async function(query, type) {
-  if (query === "") {
+Autocomplete.autocomplete_source = async function (query, type, { allowEmpty = false, limit = Autocomplete.MAX_RESULTS } = {}) {
+  if (query === "" && !allowEmpty) {
     return [];
   }
 
@@ -152,7 +157,7 @@ Autocomplete.autocomplete_source = async function(query, type) {
     "search[query]": query,
     "search[type]": type,
     "version": Autocomplete.VERSION,
-    "limit": Autocomplete.MAX_RESULTS
+    "limit": limit,
   });
 
   let items = $(html).find("li").toArray().map(item => {
@@ -172,4 +177,3 @@ $(document).ready(function() {
 });
 
 export default Autocomplete;
-

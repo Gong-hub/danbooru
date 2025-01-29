@@ -10,24 +10,9 @@
 # https://schema.org/WebSite
 
 module SeoHelper
-  def site_description
-    "#{Danbooru.config.canonical_app_name} is the original anime image booru. Search millions of anime pictures categorized by thousands of tags."
-  end
-
-  # https://developers.google.com/search/docs/data-types/video#video-object
-  def json_ld_video_data(post)
-    json_ld_tag({
-      "@context": "https://schema.org",
-      "@type": "VideoObject",
-      name: page_title,
-      description: meta_description,
-      uploadDate: post.created_at.iso8601,
-      thumbnailUrl: post.media_asset.variant("360x360").file_url,
-      contentUrl: post.file_url,
-    })
-  end
-
   def json_ld_website_data
+    site_url = Danbooru.config.canonical_url.chomp("/")
+
     urls = [
       Danbooru.config.twitter_url,
       Danbooru.config.discord_server_url,
@@ -40,23 +25,23 @@ module SeoHelper
       "@graph": [
         {
           "@type": "Organization",
-          url: root_url(host: Danbooru.config.hostname),
+          url: site_url,
           name: Danbooru.config.app_name,
-          logo: "#{root_url(host: Danbooru.config.hostname)}images/danbooru-logo-500x500.png",
+          logo: "#{site_url}/images/danbooru-logo-500x500.png",
           sameAs: urls,
         },
         {
           "@type": "WebSite",
-          "@id": root_url(anchor: "website", host: Danbooru.config.hostname),
-          url: root_url(host: Danbooru.config.hostname),
+          "@id": "#{site_url}/#website",
+          url: site_url,
           name: Danbooru.config.app_name,
-          description: site_description,
+          description: Danbooru.config.site_description,
           potentialAction: [{
             "@type": "SearchAction",
-            target: "#{posts_url(host: Danbooru.config.hostname)}?tags={search_term_string}",
+            target: "#{site_url}/posts?tags={search_term_string}",
             "query-input": "required name=search_term_string",
           }]
-        }
+        }.compact
       ]
     })
   end

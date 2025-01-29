@@ -4,10 +4,10 @@
   <meta charset="utf-8">
   <title><%= page_title %></title>
 
-  <link rel="icon" href="/favicon.ico" sizes="16x16" type="image/x-icon">
-  <link rel="icon" href="/favicon.svg" sizes="any" type="image/svg+xml">
+  <%= tag.link href: "#{root_path}favicon.ico", rel: "icon", sizes: "16x16", type: "image/x-icon" %>
+  <%= tag.link href: "#{root_path}favicon.svg", rel: "icon", sizes: "any", type: "image/svg+xml" %>
   <%= render_meta_links @current_item if @current_item.respond_to?(:paginate) %>
-  <%= tag.link rel: "canonical", href: canonical_url %>
+  <%= tag.link rel: "canonical", href: seo_canonical_url %>
   <%= tag.link rel: "search", type: "application/opensearchdescription+xml", href: opensearch_url(format: :xml, version: 2), title: "Search posts" %>
 
   <%= csrf_meta_tag %>
@@ -22,9 +22,11 @@
 
   <%# XXX hack to only load Ruffle on Flash posts %>
   <% if controller_name == "posts" && action_name == "show" && @post&.is_flash? %>
-    <%= javascript_pack_tag "application", "alpine", "flash", defer: false %>
+    <%= javascript_pack_tag "application", "flash", defer: false %>
+  <% elsif controller_name == "media_assets" && action_name == "show" && @media_asset&.is_flash? %>
+    <%= javascript_pack_tag "application", "flash", defer: false %>
   <% else %>
-    <%= javascript_pack_tag "application", "alpine", defer: false %>
+    <%= javascript_pack_tag "application", defer: false %>
   <% end %>
 
   <%= stylesheet_pack_tag "application" %>
@@ -36,11 +38,12 @@
     <%= json_ld_website_data %>
   <% end %>
 
-  <%= tag.meta name: "description", content: meta_description %>
+  <% page_description = meta_description %>
+  <%= tag.meta name: "description", content: page_description if page_description %>
   <%= tag.meta property: "og:type", content: "website" %>
   <%= tag.meta property: "og:site_name", content: Danbooru.config.app_name %>
   <%= tag.meta property: "og:title", content: page_title %>
-  <%= tag.meta property: "og:description", content: meta_description %>
+  <%= tag.meta property: "og:description", content: page_description if page_description %>
   <%= tag.meta property: "og:url", content: request.original_url %>
 
   <% if Danbooru.config.twitter_username.present? %>
@@ -48,7 +51,7 @@
   <% end %>
 
   <%= tag.meta name: "twitter:title", content: page_title %>
-  <%= tag.meta name: "twitter:description", content: meta_description %>
+  <%= tag.meta name: "twitter:description", content: page_description if page_description %>
 
   <%= tag.meta name: "git-hash", content: Rails.application.config.x.git_hash %>
   <%= tag.meta name: "theme-color", content: "hsl(213, 100%, 50%)" %>
@@ -58,22 +61,22 @@
 </head>
 
 <%= tag.body **body_attributes(CurrentUser.user, params, @current_item, @exception) do %>
-  <% if NewsUpdate.recent.present? %>
-    <div id="news-updates" data-id="<%= NewsUpdate.recent.first.try(:id) %>" style="display: none;">
-      <ul>
-        <% NewsUpdate.recent.each do |news_update| %>
-          <li><%= news_update.message.html_safe %></li>
+  <% if @visible_news_updates.present? %>
+    <div id="news-updates" data-id="<%= @visible_news_updates.first.try(:id) %>" class="flex gap-1 p-1 items-center text-center text-xs <%= ("hidden" if cookies["news-ticker"].to_i == @visible_news_updates.first.try(:id)) %>">
+      <div class="flex-grow-1">
+        <%  @visible_news_updates.each do |news_update| %>
+          <div><%= news_update.message.html_safe %></div>
         <% end %>
-      </ul>
+      </div>
 
-      <a href="#" id="close-news-ticker-link"><%= close_icon %></a>
+      <a href="#" id="close-news-ticker-link" class="px-2 py-1"><%= close_icon %></a>
     </div>
   <% end %>
 
   <header id="top">
-    <div id="app-name-header" class="font-bold font-header leading-normal inline-flex items-center gap-1">
+    <div id="app-name-header" class="font-bold font-header leading-normal inline-flex items-end gap-2">
       <%= link_to image_pack_tag("static/danbooru-logo-128x128.png"), root_path, id: "app-logo" %>
-      <%= link_to Danbooru.config.app_name, root_path, id: "app-name" %>
+      <%= link_to Danbooru.config.app_name, root_path, id: "app-name", class: "m-auto" %>
     </div>
 
     <div id="maintoggle" class="mobile-only">
@@ -145,10 +148,10 @@
 
     <% if CurrentUser.user.is_banned? %>
       <div class="notice notice-error notice-large" id="ban-notice">
-        <h2>You have been banned <%= humanized_duration CurrentUser.user.active_ban.duration %></h2>
+        <h2>You have been banned <%= CurrentUser.user.active_ban.humanized_duration %></h2>
 
         <div>
-          Reason: <span class="prose"><%= format_text CurrentUser.user.active_ban.reason, inline: true %></span>
+          Reason: <span class="prose"><%= CurrentUser.user.active_ban.dtext_reason.format_text %></span>
         </div>
       </div>
     <% end %>
@@ -164,47 +167,37 @@
       </div>
     <% end %>
 
-    <div class="notice notice-info" id="notice" style="<%= "display: none;" unless flash[:notice] %>">
-      <span class="prose"><%= format_text(flash[:notice], inline: true) %>.</span>
-      <a href="#" id="close-notice-link">close</a>
+    <div id="notice" class="notice notice-info flex fixed top-2 left-2 right-2 p-2 mx-auto max-w-720px max-h-150px thin-scrollbar z-9999 sm:text-sm" style="<%= "display: none;" unless flash[:notice] %>">
+      <span class="prose flex-1"><%= format_text(flash[:notice], inline: true) %></span>
+      <a href="#" id="close-notice-link" class="flex self-center text-lg" data-shortcut="esc"><%= close_icon %></a>
     </div>
 
     <%= yield :layout %>
   </div>
 
-  <div id="tooltips">
-    <%# Order matters here; items at the bottom of the list appear on top of earlier items %>
-    <div id="post-tooltips"></div>
-    <div id="comment-votes-tooltips"></div>
-    <div id="post-votes-tooltips"></div>
-    <div id="post-favorites-tooltips"></div>
-    <div id="user-tooltips"></div>
-    <div id="popup-menus"></div>
-  </div>
+  <div id="tooltips"></div>
 
-  <footer id="page-footer" class="text-sm flex-initial mt-4">
+  <footer id="page-footer" class="text-sm text-center flex-initial mt-4 py-3 w-full border-t flex flex-wrap items-center justify-center gap-1">
     <%= link_to "Terms", terms_of_service_path %>
     / <%= link_to "Privacy", privacy_policy_path %>
     / <%= link_to "Upgrade", new_user_upgrade_path %>
     / <%= link_to "Contact", contact_path %>
     /
-    <span class="social-icons">
-      <% if Danbooru.config.source_code_url.present? %>
-        <%= link_to Danbooru.config.source_code_url, title: "Running commit: #{Rails.application.config.x.git_hash&.first(9)}", class: "social-icon" do %>
-          <%= github_icon %>
-        <% end %>
+    <% if Danbooru.config.source_code_url.present? %>
+      <%= link_to Danbooru.config.source_code_url, title: "Running commit: #{Rails.application.config.x.git_hash&.first(9)}", class: "social-icon" do %>
+        <%= github_icon(class: "h-4") %>
       <% end %>
-      <% if Danbooru.config.twitter_username.present? %>
-        <%= link_to "https://twitter.com/#{Danbooru.config.twitter_username}", class: "social-icon" do %>
-          <%= twitter_icon %>
-        <% end %>
+    <% end %>
+    <% if Danbooru.config.twitter_username.present? %>
+      <%= link_to "https://twitter.com/#{Danbooru.config.twitter_username}", class: "social-icon" do %>
+        <%= twitter_icon(class: "h-4") %>
       <% end %>
-      <% if Danbooru.config.discord_server_url.present? %>
-        <%= link_to Danbooru.config.discord_server_url, class: "social-icon" do %>
-          <%= discord_icon %>
-        <% end %>
+    <% end %>
+    <% if Danbooru.config.discord_server_url.present? %>
+      <%= link_to Danbooru.config.discord_server_url, class: "social-icon" do %>
+        <%= discord_icon(class: "h-4") %>
       <% end %>
-    </span>
+    <% end %>
   </footer>
 <% end %>
 </html>

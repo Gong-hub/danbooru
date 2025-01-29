@@ -1,4 +1,6 @@
 require "active_support/core_ext/integer/time"
+require_relative "../../app/logical/danbooru/url"
+require_relative "../../app/logical/current_user"
 
 Rails.application.configure do
   # Settings specified here will take precedence over those in config/application.rb.
@@ -6,16 +8,13 @@ Rails.application.configure do
   # In the development environment your application's code is reloaded any time
   # it changes. This slows down response time but is perfect for development
   # since you don't have to restart the web server when you make code changes.
-  config.cache_classes = false
+  config.enable_reloading = true
 
   # Do not eager load code on boot.
   config.eager_load = false
 
   # Show full error reports.
   config.consider_all_requests_local = true
-
-  # Enable server timing
-  config.server_timing = true
 
   # Enable/disable caching. By default caching is disabled.
   # Run rails dev:cache to toggle caching.
@@ -54,6 +53,9 @@ Rails.application.configure do
   config.active_record.verbose_query_logs = true
 
   config.active_job.queue_adapter = :good_job
+  # Highlight code that enqueued background job in logs.
+  config.active_job.verbose_enqueue_logs = true
+
 
   # Raises error for missing translations.
   # config.i18n.raise_on_missing_translations = true
@@ -61,21 +63,23 @@ Rails.application.configure do
   # Annotate rendered view with file names.
   # config.action_view.annotate_rendered_view_with_filenames = true
 
+  # Raise error when a before_action's only/except options reference missing actions
+  config.action_controller.raise_on_missing_callback_actions = true
+
   # Use an evented file watcher to asynchronously detect changes in source code,
   # routes, locales, etc. This feature depends on the listen gem.
   config.file_watcher = ActiveSupport::EventedFileUpdateChecker unless Danbooru.config.debug_mode
 
-  # Uncomment if you wish to allow Action Cable access from any origin.
-  # config.action_cable.disable_request_forgery_protection = true
-
-  logger           = ActiveSupport::Logger.new(STDERR)
-  logger.formatter = config.log_formatter
-  config.logger    = ActiveSupport::TaggedLogging.new(logger)
-
   BetterErrors::Middleware.allow_ip!(IPAddr.new("0.0.0.0/0"))
   BetterErrors::Middleware.allow_ip!(IPAddr.new("::/0"))
 
+  # Log SQL queries at INFO level instead of DEBUG level.
+  config.active_record.logger = Logger.new(STDERR)
+  def (config.active_record.logger).add(level, message = nil, prog = nil)
+    Rails.logger.add(Logger::Severity::INFO, message, prog)
+  end
+
   # https://bigbinary.com/blog/rails-6-adds-guard-against-dns-rebinding-attacks
   # hxxps://github.com/rails/rails/pull/33145
-  config.hosts += [".ngrok.io", ".lvh.me", ".xip.io", ".nip.io", Danbooru.config.hostname]
+  config.hosts += [".ngrok.io", ".ngrok.app", ".ngrok.dev", ".ngrok-free.app", ".ngrok-free.dev", ".app.github.dev", ".nip.io", ".localhost", ".local", Danbooru::URL.parse!(Danbooru.config.canonical_url).host]
 end

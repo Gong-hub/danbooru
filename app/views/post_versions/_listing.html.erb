@@ -24,14 +24,51 @@
         </div>
         <div>
           <b>Tags:</b>
-          <%= render_inline_tag_list_from_names(post_version.tag_array) %>
+
+          <% if post_version.tag_array.size <= PostVersion::MAX_DISPLAY_TAGS %>
+            <%= render_inline_tag_list_from_names(post_version.tag_array) %>
+          <% else %>
+            <div class="prose">
+              <details>
+                <summary><%= post_version.tag_array.size %> tags</summary>
+
+                <div class="thin-scrollbar overflow-auto max-h-180px">
+                  <%= post_version.tags %>
+                </div>
+              </details>
+            </div>
+          <% end %>
         </div>
         <div>
           <%= post_source_tag(post_version.source) %>
         </div>
       <% end %>
       <% t.column "Edits", td: {class: "col-expand"}, width: "40%" do |post_version| %>
-        <%= post_version_diff(post_version, params[:type]) %>
+        <% if (post_version.added_tags.size + post_version.removed_tags.size) <= PostVersion::MAX_DISPLAY_TAGS %>
+          <%= post_version_diff(post_version, params[:type]) %>
+        <% else %>
+          <div class="prose">
+            <% if post_version.added_tags.present? %>
+              <details>
+                <summary><%= pluralize(post_version.added_tags.size, "tag") %> added</summary>
+
+                <div class="thin-scrollbar overflow-auto max-h-180px">
+                  <%= post_version.added_tags.join(" ") %>
+                </div>
+              </details>
+            <% end %>
+
+            <% if post_version.removed_tags.present? %>
+              <details>
+                <summary><%= pluralize(post_version.removed_tags.size, "tag") %> removed</summary>
+
+                <div class="thin-scrollbar overflow-auto max-h-180px">
+                  <%= post_version.removed_tags.join(" ") %>
+                </div>
+              </details>
+            <% end %>
+          </div>
+        <% end %>
       <% end %>
       <% t.column "Changes", width: "5%" do |post_version| %>
         <%= status_diff_html(post_version, params[:type]) %>

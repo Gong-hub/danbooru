@@ -24,7 +24,7 @@
 
       <% t.column "Reason", td: { class: "col-expand" } do |report| %>
         <span class="prose">
-          <%= format_text report.reason, inline: true %>
+          <%= report.dtext_reason.format_text %>
         </span>
       <% end %>
 
@@ -45,11 +45,11 @@
 
       <% t.column column: "control" do |report| %>
         <%= render PopupMenuComponent.new do |menu| %>
-          <% menu.item do %>
+          <% menu.with_item do %>
             <%= link_to "Mark as handled", moderation_report_path(report.id), method: :put, remote: true, "data-params": "moderation_report[status]=handled" %>
           <% end %>
 
-          <% menu.item do %>
+          <% menu.with_item do %>
             <%= link_to "Reject", moderation_report_path(report.id), method: :put, remote: true, "data-params": "moderation_report[status]=rejected" %>
           <% end %>
         <% end %>

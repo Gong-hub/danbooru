@@ -96,12 +96,12 @@ module ApplicationHelper
     tag.li(link_to(text, url, id: "#{id}-link", **options), id: id, class: klass)
   end
 
-  def format_text(text, **options)
-    raw DText.format_text(text, **options)
+  def format_text(text, references: DText.preprocess([text]), **options)
+    DText.new(text, **options).format_text(references:)
   end
 
   def strip_dtext(text)
-    DText.strip_dtext(text)
+    DText.new(text).strip_dtext
   end
 
   def time_tag(content, time, **options)
@@ -110,18 +110,10 @@ module ApplicationHelper
     tag.time content || datetime, datetime: datetime, title: time.to_formatted_s, **options
   end
 
-  def humanized_duration(duration)
-    if duration >= 100.years
-      "forever"
-    else
-      duration.inspect
-    end
-  end
-
   def duration_to_hhmmss(seconds)
     seconds = seconds.round
-    hh = seconds.div(1.hour).to_s
-    mm = seconds.div(1.minute).to_s
+    hh = seconds.div(1.hour)
+    mm = (seconds.seconds - hh.hours.seconds).div(1.minute)
     ss = "%.2d" % (seconds % 1.minute)
 
     if seconds >= 1.hour
@@ -130,6 +122,19 @@ module ApplicationHelper
       "#{mm}:#{ss}"
     else
       "0:01"
+    end
+  end
+
+  def duration_to_hhmmssms(seconds)
+    hh = seconds.div(1.hour).to_s
+    mm = seconds.div(1.minute).to_s
+    ss = "%.2d" % (seconds % 1.minute)
+    ms = ("%.3f" % (seconds % 1.second)).delete_prefix("0.")
+
+    if seconds >= 1.hour
+      "#{hh}:#{mm}:#{ss}.#{ms}"
+    else
+      "#{mm}:#{ss}.#{ms}"
     end
   end
 
@@ -142,6 +147,27 @@ module ApplicationHelper
       format("%.1f#{thousand}", number / 1_000.0)
     else
       number.to_s
+    end
+  end
+
+  def humanized_time(time)
+    if time.nil?
+      tag.em(tag.time("unknown"))
+    elsif time.past?
+      if time > 1.day.ago
+        human_time = time_ago_in_words(time).gsub(/about|over|less than|almost/, "")
+        time_tag("#{human_time} ago", time)
+      elsif time > Time.zone.today.beginning_of_year
+        time_tag(time.strftime("%b %e"), time)
+      else
+        time_tag(time.strftime("%b %e, %Y"), time)
+      end
+    elsif time.future?
+      if time < 1.day.from_now
+        time_tag("in #{time_ago_in_words(time)}", time)
+      else
+        time_tag(time.strftime("%b %e, %Y"), time)
+      end
     end
   end
 
@@ -180,7 +206,8 @@ module ApplicationHelper
     time_tag(time.strftime("%Y-%m-%d %H:%M"), time)
   end
 
-  def external_link_to(url, text = url, truncate: nil, strip: false, **link_options)
+  def external_link_to(url, text = url, truncate: nil, strip: false, **link_options, &block)
+    text = capture { yield } if block_given?
     text = text.gsub(%r{\Ahttps?://}i, "") if strip == :scheme
     text = text.gsub(%r{\Ahttps?://(?:www\.)?}i, "") if strip == :subdomain
     text = text.truncate(truncate) if truncate
@@ -195,16 +222,16 @@ module ApplicationHelper
   def link_to_ip(ip, shorten: false, **options)
     ip_addr = IPAddr.new(ip.to_s)
     ip_addr.prefix = 64 if ip_addr.ipv6? && shorten
-    link_to ip_addr.to_s, user_events_path(search: { user_session: { ip_addr: ip }}), **options
+    link_to ip_addr.to_s, user_events_path(search: { ip_addr: ip }), **options
   end
 
   def link_to_search(tag, **options)
     link_to tag.pretty_name, posts_path(tags: tag.name), class: tag_class(tag), **options
   end
 
-  def link_to_wiki(text, title = text, **options)
+  def link_to_wiki(text, title = text, classes: nil, **options)
     title = "~#{title}" if title =~ /\A\d+\z/
-    link_to text, wiki_page_path(title), class: "wiki-link", **options
+    link_to text, wiki_page_path(title), class: "wiki-link #{classes}", **options
   end
 
   def link_to_wikis(*wiki_titles, **options)
@@ -215,7 +242,15 @@ module ApplicationHelper
     to_sentence(links, **options)
   end
 
-  def link_to_user(user, text = nil, classes: nil, **options)
+  def link_to_media_asset(media_asset, url: media_asset, classes: nil, **options)
+    duration_text = media_asset.duration.present? ? " (#{duration_to_hhmmss(media_asset.duration)})" : ""
+    size_text = "#{media_asset.image_width}x#{media_asset.image_height}"
+    file_text = "#{number_to_human_size(media_asset.file_size)} .#{media_asset.file_ext}"
+
+    link_to("#{file_text}, #{size_text}#{duration_text}", url, class: classes, **options)
+  end
+
+  def link_to_user(user, text = nil, url: user, classes: nil, **options)
     return "anonymous" if user.blank?
 
     user_class = "user user-#{user.level_string.downcase} #{classes}".strip
@@ -223,17 +258,23 @@ module ApplicationHelper
 
     text = user.pretty_name if text.blank?
     data = { "user-id": user.id, "user-name": user.name, "user-level": user.level }
-    link_to(text, user, class: user_class, data: data)
+    link_to(text, url, class: user_class, data: data)
   end
 
-  def embed_wiki(title, **options)
+  def embed_wiki(title, classes: nil, **options)
     wiki = WikiPage.find_by(title: title)
-    text = format_text(wiki&.body)
-    tag.div(text, class: "prose", **options)
+    text = wiki&.dtext_body&.format_text
+    tag.div(text, class: "prose #{classes}".strip, **options)
   end
 
-  def dtext_preview_button(preview_field)
-    tag.input value: "Preview", type: "button", class: "dtext-preview-button", "data-preview-field": preview_field
+  # Generates a captcha widget inside a form.
+  def captcha_tag(...)
+    CaptchaService.new.captcha_tag(...)
+  end
+
+  def dtext_preview_button(preview_field, media_embeds: false, class: nil)
+    klass = binding.local_variable_get(:class)
+    tag.input value: "Preview", type: "button", class: "dtext-preview-button #{klass}", "data-preview-field": preview_field, "data-media-embeds": media_embeds
   end
 
   def quick_search_form_for(attribute, url, name, autocomplete: nil, redirect: false, &block)
@@ -247,11 +288,11 @@ module ApplicationHelper
     end
   end
 
-  def search_form_for(url, classes: "inline-form", method: :get, &block)
+  def search_form_for(url, attribute: :search, classes: "inline-form", method: :get, &block)
     defaults = { required: false }
-    html_options = { autocomplete: "off", class: "search-form #{classes}" }
+    html_options = { autocomplete: "off", novalidate: true, class: "search-form #{classes}" }
 
-    simple_form_for(:search, method: method, url: url, defaults: defaults, html: html_options) do |f|
+    simple_form_for(attribute, method: method, url: url, defaults: defaults, html: html_options) do |f|
       out = "".html_safe
       out += tag.input(type: :hidden, name: :limit, value: params[:limit]) if params[:limit].present?
       out += capture { yield f } if block_given?
@@ -259,16 +300,16 @@ module ApplicationHelper
     end
   end
 
-  def edit_form_for(model, **options, &block)
-    options[:html] = { autocomplete: "off", **options[:html].to_h }
+  def edit_form_for(model, validate: false, error_notice: true, warning_notice: true, **options, &block)
+    options[:html] = { autocomplete: "off", novalidate: !validate, **options[:html].to_h }
     options[:authenticity_token] = true if options[:remote] == true
 
     simple_form_for(model, **options) do |form|
-      if model.try(:errors).try(:any?)
+      if error_notice && model.try(:errors).try(:any?)
         concat tag.div(format_text(model.errors.full_messages.join("; ")), class: "notice notice-error notice-small prose")
       end
 
-      if model.try(:warnings).try(:any?)
+      if warning_notice && model.try(:warnings).try(:any?)
         concat tag.div(format_text(model.warnings.full_messages.join("; ")), class: "notice notice-info notice-small prose")
       end
 
@@ -380,16 +421,20 @@ module ApplicationHelper
     end
   end
 
-  def canonical_url(url = nil)
-    if url.present?
-      content_for(:canonical_url) { url }
-    elsif content_for(:canonical_url).present?
-      content_for(:canonical_url)
+  # Set the URL used in the <link rel="canonical" href="..."> tag for the
+  # current page. If no URL is given, return the current canonical URL.
+  def seo_canonical_url(url = nil, root_url: Danbooru.config.canonical_url)
+    if url.present? && url.starts_with?("/")
+      content_for(:seo_canonical_url) { root_url.chomp("/") + url }
+    elsif url.present?
+      content_for(:seo_canonical_url) { url }
+    elsif content_for(:seo_canonical_url).present?
+      content_for(:seo_canonical_url)
     else
       request_params = request.params.sort.to_h.with_indifferent_access
       request_params.delete(:page) if request_params[:page].to_i == 1
       request_params.delete(:limit)
-      url_for(**request_params, host: Danbooru.config.hostname, only_path: false)
+      root_url.chomp("/") + url_for(**request_params, only_path: true)
     end
   end
 

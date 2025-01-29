@@ -25,6 +25,7 @@ class UploadMediaAsset < ApplicationRecord
 
   scope :unfinished, -> { where(status: %w[pending processing]) }
   scope :finished, -> { where(status: %w[active failed]) }
+  scope :expired, -> { unfinished.where(created_at: ..4.hours.ago) }
 
   def self.visible(user)
     if user.is_admin?
@@ -34,6 +35,25 @@ class UploadMediaAsset < ApplicationRecord
     else
       where(upload: user.uploads)
     end
+  end
+
+  def self.prune!
+    expired.update_all(status: :failed, error: "Stuck processing for more than 4 hours")
+  end
+
+  def self.is_matches(value)
+    case value.downcase
+    when *UploadMediaAsset.statuses.keys
+      where(status: value)
+    when *MediaAsset::FILE_TYPES
+      attribute_matches(value, :file_ext, :enum)
+    else
+      none
+    end
+  end
+
+  def self.exif_matches(string)
+    merge(MediaAsset.exif_matches(string))
   end
 
   def self.search(params, current_user)
@@ -64,26 +84,44 @@ class UploadMediaAsset < ApplicationRecord
   end
 
   def file_upload?
-    source_url.starts_with?("file://")
+    # XXX in production there are ~150 old assets with blank source urls because the source went bad id before the image url could be saved.
+    source_url.starts_with?("file://") || source_url.blank?
   end
 
-  # The source of the post after upload.
-  def canonical_url
-    return source_url if file_upload?
+  def bad_link?
+    parsed_canonical_url&.bad_link?
+  end
 
-    # If the image URL is convertible to a page URL, or the page URL couldn't
-    # be found, then use the image URL as the source of the post. Otherwise,
-    # use the page URL.
-    if Source::URL.page_url(source_url).present? || page_url.blank?
+  # The source of the post after upload. This is either the image URL, if the image URL is convertible to a page URL
+  # (e.g. Pixiv), or the page URL if it's not (e.g. Twitter).
+  memoize def canonical_url
+    if file_upload?
       source_url
-    else
+
+    # If the source is an image URL that is convertible to a page URL, then use the image URL as the post source.
+    elsif Source::URL.page_url(source_url).present?
+      source_url
+
+    # If a better page URL can be found by the extractor (potentially with an API call), then use that as the source.
+    elsif source_extractor&.page_url.present?
+      source_extractor.page_url
+
+    # If we can't find any better page URL, then just use the one we already have.
+    elsif page_url.present?
       page_url
+
+    # Otherwise if we can't find a page URL at all, then just use the image URL.
+    else
+      source_url
     end
   end
 
-  def source_extractor
-    return nil if source_url.blank?
-    Source::Extractor.find(source_url, page_url)
+  memoize def parsed_canonical_url
+    Source::URL.parse(canonical_url) unless file_upload?
+  end
+
+  memoize def source_extractor
+    Source::Extractor.find(source_url, page_url) unless file_upload?
   end
 
   # Calls `process_upload!`
@@ -112,6 +150,8 @@ class UploadMediaAsset < ApplicationRecord
     update!(status: :active)
   rescue Exception => e
     update!(status: :failed, error: e.message)
+  ensure
+    media_file&.close
   end
 
   def update_upload_status
@@ -123,6 +163,4 @@ class UploadMediaAsset < ApplicationRecord
       end
     end
   end
-
-  memoize :source_extractor
 end

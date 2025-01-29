@@ -3,13 +3,15 @@ function importAll(r) {
   r.keys().forEach(r);
 }
 
-// XXX for dropzone.
-import "core-js/web/dom-collections";
+// This will only import the necessary polyfills needed by the current browserslist setting in package.json, not
+// everything. See @babel/preset-env.
+import "core-js";
 
-require('@rails/ujs').start();
 require('hammerjs');
 require('jquery-hotkeys');
-import morphdom from 'morphdom';
+import Alpine from 'alpinejs';
+import morph from '@alpinejs/morph';
+import persist from '@alpinejs/persist'
 
 // should start looking for nodejs replacements
 importAll(require.context('../vendor', true, /\.js$/));
@@ -26,23 +28,30 @@ require("jquery-ui/themes/base/button.css");
 require("jquery-ui/themes/base/dialog.css");
 require("jquery-ui/themes/base/theme.css");
 
-require("@fortawesome/fontawesome-free/css/fontawesome.css");
-require("@fortawesome/fontawesome-free/css/solid.css");
-require("@fortawesome/fontawesome-free/css/regular.css");
+import Rails from '@rails/ujs';
+Rails.start();
+
+import 'tippy.js/dist/tippy.css';
 
 importAll(require.context('../src/javascripts', true, /\.js(\.erb)?$/));
 importAll(require.context('../src/styles', true, /\.s?css(?:\.erb)?$/));
 importAll(require.context('../../components', true, /\.s?css(?:\.erb)?$/));
 
 import Autocomplete from "../src/javascripts/autocomplete.js";
+import ArtistCommentary from "../src/javascripts/artist_commentaries.js";
 import Blacklist from "../src/javascripts/blacklists.js";
 import CommentComponent from "../src/javascripts/comment_component.js";
 import CommentVotesTooltipComponent from "../src/javascripts/comment_votes_tooltip_component.js";
+import Cookie from "../src/javascripts/cookie.js";
 import CurrentUser from "../src/javascripts/current_user.js";
+import Device from "../src/javascripts/device.js";
+import Draggable from "../src/javascripts/draggable.js";
 import Dtext from "../src/javascripts/dtext.js";
 import FavoritesTooltipComponent from "../src/javascripts/favorites_tooltip_component.js";
 import FileUploadComponent from "../src/javascripts/file_upload_component.js";
 import ForumPostComponent from "../src/javascripts/forum_post_component.js";
+import FormValidator from "../src/javascripts/form_validator.js";
+import HelpTooltipComponent from "../src/javascripts/help_tooltip_component.js";
 import IqdbQuery from "../src/javascripts/iqdb_queries.js";
 import Note from "../src/javascripts/notes.js";
 import MediaAssetComponent from "../src/javascripts/media_asset_component.js";
@@ -63,14 +72,20 @@ import Ugoira from "../src/javascripts/ugoira.js"
 
 let Danbooru = {};
 Danbooru.Autocomplete = Autocomplete;
+Danbooru.ArtistCommentary = ArtistCommentary;
 Danbooru.Blacklist = Blacklist;
 Danbooru.CommentComponent = CommentComponent;
 Danbooru.CommentVotesTooltipComponent = CommentVotesTooltipComponent;
+Danbooru.Cookie = Cookie;
 Danbooru.CurrentUser = CurrentUser;
+Danbooru.Device = Device;
+Danbooru.Draggable = Draggable;
 Danbooru.Dtext = Dtext;
 Danbooru.FavoritesTooltipComponent = FavoritesTooltipComponent;
 Danbooru.FileUploadComponent = FileUploadComponent;
 Danbooru.ForumPostComponent = ForumPostComponent;
+Danbooru.FormValidator = FormValidator;
+Danbooru.HelpTooltipComponent = HelpTooltipComponent;
 Danbooru.IqdbQuery = IqdbQuery;
 Danbooru.MediaAssetComponent = MediaAssetComponent;
 Danbooru.Note = Note;
@@ -94,5 +109,9 @@ Danbooru.error = Utility.error;
 
 window.$ = jQuery;
 window.jQuery = jQuery;
-window.morphdom = morphdom;
+window.Alpine = Alpine;
 window.Danbooru = Danbooru;
+
+Alpine.plugin(morph);
+Alpine.plugin(persist)
+$(() => Alpine.start());

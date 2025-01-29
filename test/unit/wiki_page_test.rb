@@ -58,6 +58,20 @@ class WikiPageTest < ActiveSupport::TestCase
         assert_equal("external_link", @wiki_page.dtext_links.first.link_type)
         assert_equal("http://www.google.com", @wiki_page.dtext_links.first.link_target)
 
+        @wiki_page.update!(body: "!post #1\n!asset #2")
+        assert_equal(2, @wiki_page.dtext_links.size)
+        assert_equal("embedded_post", @wiki_page.dtext_links.embedded_post.first.link_type)
+        assert_equal("1", @wiki_page.dtext_links.embedded_post.first.link_target)
+        assert_equal("embedded_media_asset", @wiki_page.dtext_links.embedded_media_asset.first.link_type)
+        assert_equal("2", @wiki_page.dtext_links.embedded_media_asset.first.link_target)
+
+        @wiki_page.update!(body: "* !post #3\n* !asset #4")
+        assert_equal(2, @wiki_page.dtext_links.size)
+        assert_equal("embedded_post", @wiki_page.dtext_links.embedded_post.first.link_type)
+        assert_equal("3", @wiki_page.dtext_links.embedded_post.first.link_target)
+        assert_equal("embedded_media_asset", @wiki_page.dtext_links.embedded_media_asset.first.link_type)
+        assert_equal("4", @wiki_page.dtext_links.embedded_media_asset.first.link_target)
+
         @wiki_page.update!(body: "nothing")
         assert_equal(0, @wiki_page.dtext_links.size)
       end
@@ -114,6 +128,8 @@ class WikiPageTest < ActiveSupport::TestCase
       should normalize_attribute(:title).from(" Foo___   Bar ").to("foo_bar")
 
       should_not allow_value("").for(:title).on(:create)
+      should_not allow_value(" ").for(:title).on(:create)
+      should_not allow_value("\u200B").for(:title).on(:create)
       should_not allow_value("___").for(:title).on(:create)
       should_not allow_value("-foo").for(:title).on(:create)
       should_not allow_value("/foo").for(:title).on(:create)
@@ -124,6 +140,12 @@ class WikiPageTest < ActiveSupport::TestCase
       should_not allow_value("東方").for(:title).on(:create)
       should_not allow_value("FAV:blah").for(:title).on(:create)
       should_not allow_value("X"*171).for(:title).on(:create)
+    end
+
+    context "during body validation" do
+      should_not allow_value("").for(:body)
+      should_not allow_value(" ").for(:body)
+      should_not allow_value("\u200B").for(:body)
     end
 
     context "with other names" do

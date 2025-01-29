@@ -1,14 +1,22 @@
 # frozen_string_literal: true
 
 class ForumPost < ApplicationRecord
-  attr_readonly :topic_id
+  MAX_IMAGES = 1
+  MAX_VIDEO_SIZE = 1.megabyte
+  MAX_LARGE_EMOJI = 1
+  MAX_SMALL_EMOJI = 100
+
+  # attr_readonly :topic_id # XXX broken by accepts_nested_attributes_for in ForumTopic
   attr_accessor :creator_ip_addr
+
+  dtext_attribute :body, media_embeds: true # defines :dtext_body
 
   belongs_to :creator, class_name: "User"
   belongs_to_updater
   belongs_to :topic, class_name: "ForumTopic", inverse_of: :forum_posts
 
   has_many :moderation_reports, as: :model
+  has_many :reactions, as: :model, dependent: :destroy, class_name: "Reaction"
   has_many :pending_moderation_reports, -> { pending }, as: :model, class_name: "ModerationReport"
   has_many :votes, class_name: "ForumPostVote"
   has_many :mod_actions, as: :subject, dependent: :destroy
@@ -16,21 +24,17 @@ class ForumPost < ApplicationRecord
   has_one :tag_implication
   has_one :bulk_update_request
 
-  validates :body, presence: true, length: { maximum: 200_000 }, if: :body_changed?
+  validates :body, visible_string: true, length: { maximum: 200_000 }, if: :body_changed?
   validate :validate_deletion_of_original_post
   validate :validate_undeletion_of_post
+  validate :validate_body
 
   before_create :autoreport_spam
   before_save :handle_reports_on_deletion
   after_create :update_topic_updated_at_on_create
   after_update :update_topic_updated_at_on_update_for_original_posts
   after_destroy :update_topic_updated_at_on_destroy
-  after_update(:if => ->(rec) {rec.updater_id != rec.creator_id}) do |forum_post|
-    ModAction.log("updated #{forum_post.dtext_shortlink}", :forum_post_update, subject: self, user: forum_post.updater)
-  end
-  after_destroy(:if => ->(rec) {rec.updater_id != rec.creator_id}) do |forum_post|
-    ModAction.log("deleted #{forum_post.dtext_shortlink}", :forum_post_delete, subject: self, user: forum_post.updater)
-  end
+  after_update :create_mod_action
   after_create_commit :async_send_discord_notification
 
   deletable
@@ -38,7 +42,7 @@ class ForumPost < ApplicationRecord
   mentionable(
     message_field: :body,
     title: ->(_user_name) {%{#{creator.name} mentioned you in topic ##{topic_id} (#{topic.title})}},
-    body: ->(user_name) {%{@#{creator.name} mentioned you in topic ##{topic_id} ("#{topic.title}":[#{Routes.forum_topic_path(topic, page: forum_topic_page)}]):\n\n[quote]\n#{DText.extract_mention(body, "@#{user_name}")}\n[/quote]\n}}
+    body: ->(user_name) {%{@#{creator.name} mentioned you in topic ##{topic_id} ("#{topic.title}":[#{Routes.forum_topic_path(topic, page: forum_topic_page)}]):\n\n[quote]\n#{DText.new(body).extract_mention("@#{user_name}")}\n[/quote]\n}}
   )
 
   module SearchMethods
@@ -97,6 +101,33 @@ class ForumPost < ApplicationRecord
     end
   end
 
+  def validate_body
+    if dtext_body.block_emoji_names.count > MAX_LARGE_EMOJI
+      errors.add(:base, "Can't include more than #{MAX_LARGE_EMOJI} #{"sticker".pluralize(MAX_LARGE_EMOJI)}")
+    end
+
+    if dtext_body.inline_emoji_names.count > MAX_SMALL_EMOJI
+      errors.add(:base, "Can't include more than #{MAX_SMALL_EMOJI} #{"emoji".pluralize(MAX_SMALL_EMOJI)}")
+    end
+
+    if dtext_body.embedded_media.count > MAX_IMAGES
+      errors.add(:base, "Can't include more than #{MAX_IMAGES} #{"image".pluralize(MAX_IMAGES)}")
+      return # don't check the actual images if the user included too many images
+    end
+
+    if dtext_body.embedded_posts.any? { _1.is_video? && _1.file_size > MAX_VIDEO_SIZE } || dtext_body.embedded_media_assets.any? { _1.is_video? && _1.file_size > MAX_VIDEO_SIZE }
+      errors.add(:base, "Can't include videos larger than #{MAX_VIDEO_SIZE.to_fs(:human_size)}")
+    end
+
+    if dtext_body.embedded_posts.any? { |embedded_post| embedded_post.rating != "g" }
+      errors.add(:base, "Can't post non-rating:G images")
+    end
+
+    if dtext_body.embedded_media_assets.any? { |embedded_asset| embedded_asset.ai_rating.first.in?(%w[q e]) }
+      errors.add(:base, "Can't post non-rating:G images")
+    end
+  end
+
   def autoreport_spam
     if SpamDetector.new(self, user_ip: creator_ip_addr).spam?
       moderation_reports << ModerationReport.new(creator: User.system, reason: "Spam.")
@@ -151,8 +182,16 @@ class ForumPost < ApplicationRecord
     topic.response_count -= 1
   end
 
+  def create_mod_action
+    if saved_change_to_is_deleted == [false, true] && creator != updater
+      ModAction.log("deleted #{dtext_shortlink}", :forum_post_delete, subject: self, user: updater)
+    elsif creator != updater
+      ModAction.log("updated #{dtext_shortlink}", :forum_post_update, subject: self, user: updater)
+    end
+  end
+
   def quoted_response
-    DText.quote(body, creator.name)
+    DText.new(body).quote(creator.name)
   end
 
   def forum_topic_page

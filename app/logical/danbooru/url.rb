@@ -1,5 +1,8 @@
 # frozen_string_literal: true
 
+require_relative "domain"
+require_relative "ip_address"
+
 # A utility class representing a HTTP URL. A wrapper around Addressable::URI that adds
 # extra utility methods. Anything dealing with URLs inside Danbooru should use this class
 # instead of using `Addressable::URI` or the Ruby `URI` class directly,
@@ -26,6 +29,8 @@
 # @see Source::URL
 module Danbooru
   class URL
+    extend Memoist
+
     class Error < StandardError; end
 
     # @return [String] The original URL as a string.
@@ -34,18 +39,27 @@ module Danbooru
     # @return [Addressable:URI] The parsed and normalized URL.
     attr_reader :url
 
-    delegate :domain, :host, :site, :path, :query, to: :url
+    delegate :ip_based?, :scheme, :host, :hostname, :port, :site, :authority, :path, :query, :fragment, :user, :password, to: :url
+    delegate :sld, :tld, :etld, to: :parsed_domain, allow_nil: true
 
     # Parse a string into a URL, or raise an exception if the string is not a valid HTTP or HTTPS URL.
     #
     # @param url [String, Danbooru::URL]
-    def initialize(url)
+    # @param schemes [Array<String>] The list of allowed URL schemes.
+    def initialize(url, schemes: %w[http https])
       @original_url = url.to_s
-      @url = Addressable::URI.heuristic_parse(original_url).display_uri
+      @url = Addressable::URI.heuristic_parse(original_url)
+
+      @url.authority = @url.normalized_authority
+
+      # Decode percent-encoded paths. Leave percent-encoded if characters are invalid UTF-8 or nonprintable (spaces, control characters).
+      @url.path = Addressable::URI.unencode_component(@url.path, String, "/%")
+      @url.path.force_encoding("ASCII-8BIT").gsub(/[^[:ascii:]]/) { |c| "%%%02X" % c.ord }.force_encoding("UTF-8") if !@url.path.valid_encoding?
+      @url.path = @url.path.gsub(/[^[:graph:]]/) { |c| "%%%02X" % c.ord }
       @url.path = nil if @url.path == "/"
 
-      raise Error, "#{original_url} is not an http:// URL" if !@url.normalized_scheme.in?(["http", "https"])
-      raise Error, "#{original_url} is not a valid hostname" if parsed_domain.nil?
+      raise Error, "#{original_url} is not a #{schemes.map { "#{_1}://" }.to_sentence(two_words_connector: " or ", last_word_connector: ", or ")} URL" if !@url.normalized_scheme.in?(schemes)
+      raise Error, "#{host} is not a valid hostname" if parsed_domain.nil? && ip_address.nil? && @url.normalized_scheme.in?(%w[http https])
     rescue Addressable::URI::InvalidURIError => e
       raise Error, e
     end
@@ -54,18 +68,36 @@ module Danbooru
     #
     # @param url [String, Danbooru::URL]
     # @return [Danbooru::URL]
-    def self.parse!(url)
-      new(url)
+    def self.parse!(url, **options)
+      return url if url.is_a?(Danbooru::URL)
+
+      new(url, **options)
     end
 
     # Parse a string into a URL, or return nil if the string is not a valid HTTP or HTTPS URL.
     #
     # @param url [String, Danbooru::URL]
     # @return [Danbooru::URL]
-    def self.parse(url)
-      parse!(url)
+    def self.parse(url, **options)
+      parse!(url, **options)
     rescue Error
       nil
+    end
+
+    # Escape a string for use in an URL path or query parameter. Like `CGI.escape`, but leaves Unicode characters as Unicode.
+    #
+    # @example
+    #   Danbooru::URL.escape("fate/stay_night") # => "fate%2Fstay_night"
+    #   Danbooru::URL.escape("大丈夫?おっぱい揉む?") # => "大丈夫%3Fおっぱい揉む%3F"
+    #
+    # @return [String] The escaped string
+    def self.escape(string)
+      Addressable::URI.encode_component(string, /[\/?#&+%]/).force_encoding("UTF-8")
+    end
+
+    # Unescape URL-encoded characters in a string.
+    def self.unescape(string)
+      Addressable::URI.unencode_component(string)
     end
 
     # @return [String] the URL in unnormalized form
@@ -92,7 +124,7 @@ module Danbooru
     def basename
       path_segments.last
     end
-    #
+
     # @return [String, nil] The name of the file without the file extension, or nil if not present.
     def filename
       basename&.slice(/^(.*)\./, 1)
@@ -103,19 +135,117 @@ module Danbooru
       basename&.slice(/\.([[:alnum:]]+)$/, 1)
     end
 
-    # The subdomain of the URL, or nil if absent. For example, for "http://senpenbankashiki.hp.infoseek.co.jp", the
-    # subdomain is "senpenbankashiki.hp", the domain is "infoseek.co.jp", the SLD is "infoseek", and the TLD is "co.jp".
-    #
-    # @return [String, nil]
-    def subdomain
-      parsed_domain.trd
+    # @return [String, nil] The username in a `http://username:password@example.com` URL.
+    def http_user
+      url.user
     end
 
-    # @return [PublicSuffix::Domain]
-    def parsed_domain
-      @parsed_domain ||= PublicSuffix.parse(host)
-    rescue PublicSuffix::DomainNotAllowed
-      nil
+    # Return a new URL with the components set to the given values. For example, return a new URL with the filename or
+    # file extension set to different values.
+    #
+    # @param components [Hash] The URL components to override (scheme, authority, userinfo, user, password, site, host,
+    #   port, path, basename, filename, file_ext, query, params, or fragment).
+    # @return [Danbooru::URL] The new URL.
+    def with(components)
+      components = components.dup.symbolize_keys
+
+      if components.key?(:params)
+        components[:query] = components.delete(:params).to_h.map do |key, value|
+          "#{Danbooru::URL.escape(key)}=#{Danbooru::URL.escape(value)}"
+        end.join("&").presence
+      end
+
+      if components.key?(:site)
+        site = Danbooru::URL.parse(components.delete(:site))
+        components[:scheme] = site.scheme
+        components[:authority] = site.authority
+      end
+
+      if components.key?(:file_ext)
+        new_ext = components.delete(:file_ext)
+        new_basename = [filename, new_ext].compact_blank.join(".")
+        components[:path] = "/" + [*path_segments[0..-2], new_basename].compact_blank.join("/")
+      end
+
+      if components.key?(:filename)
+        new_filename = components.delete(:filename)
+        new_basename = [new_filename, file_ext].compact_blank.join(".")
+        components[:path] = "/" + [*path_segments[0..-2], new_basename].compact_blank.join("/")
+      end
+
+      if components.key?(:basename)
+        new_basename = components.delete(:basename)
+        components[:path] = "/" + [*path_segments[0..-2], new_basename].compact_blank.join("/")
+      end
+
+      # Return the existing URL if none of the components are going to change. This is to avoid reparsing the URL if nothing will change.
+      return self if components.none? { |name, value| send(name) != value }
+
+      self.class.new(url.merge(components))
+    end
+
+    # Return a new URL with the given components removed. For example, return a new URL with the path or query params removed.
+    #
+    # @param components [Array<String, Symbol>] The URL components to override (scheme, authority, userinfo, user,
+    #   password, site, host, port, path, basename, filename, file_ext, query, params, or fragment).
+    # @return [Danbooru::URL] The new URL.
+    def without(*components)
+      with(**components.index_with(nil))
+    end
+
+    # Return a new URL with the given query params removed.
+    #
+    # @param names [Array<String, Symbol>] The names of the query params to remove.
+    # @return [Danbooru::URL] The new URL.
+    def without_params(*names)
+      with(params: params.without(*names))
+    end
+
+    # The subdomain of the URL, or nil if absent. For example, for "http://senpenbankashiki.hp.infoseek.co.jp" the
+    # subdomain is "senpenbankashiki.hp".
+    #
+    # @return [String, nil]
+    delegate :subdomain, to: :parsed_domain, allow_nil: true
+
+    # The base-level domain of the URL, or nil if absent. For example, for "http://senpenbankashiki.hp.infoseek.co.jp"
+    # the base domain is "infoseek.co.jp".
+    #
+    # @return [String, nil]
+    delegate :domain, to: :parsed_domain, allow_nil: true
+
+    # @return [Danbooru::Domain, nil] The domain name of the URL, or nil if the URL doesn't have a domain.
+    memoize def parsed_domain
+      Danbooru::Domain.parse(host) unless host.blank?
+    end
+
+    # @return [Danbooru::IpAddress, nil] The IP address of the URL, if the URL's host is an IP address instead of a domain name.
+    memoize def ip_address
+      Danbooru::IpAddress.parse(hostname) unless hostname.blank?
+    end
+
+    # Strict equality on unnormalized URLs. `Danbooru::URL.parse("https://google.com") == Danbooru::URL.parse("https://google.com/")` is false.
+    def ==(other)
+      self.class == other.class && to_s == other.to_s
+    end
+
+    # Case equality on normalized URLs. Allows comparisons with strings or regexps. `Danbooru::URL.parse("https://www.google.com") === "https://WWW.google.com/"` is true.
+    def ===(other)
+      case other
+      when Regexp
+        to_normalized_s.match?(other)
+      when Danbooru::URL
+        to_normalized_s == other.to_normalized_s
+      else
+        to_normalized_s == Danbooru::URL.parse(other.try(:to_str))&.to_normalized_s
+      end
+    end
+
+    # Hash key equality.
+    alias_method :eql?, :==
+
+    # Hash the URL for when it's used as a hash key.
+    def hash
+      [self.class, original_url].hash
     end
   end
 end

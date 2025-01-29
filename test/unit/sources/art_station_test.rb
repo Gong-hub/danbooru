@@ -8,7 +8,8 @@ module Sources
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/000/705/368/4k/jey-rain-one1.jpg?1443931773"],
         page_url: "https://jeyrain.artstation.com/projects/04XA4",
         profile_url: "https://www.artstation.com/jeyrain",
-        artist_name: "jeyrain",
+        display_name: "Jey Rain",
+        username: "jeyrain",
         tags: [],
         artist_commentary_title: "pink",
         dtext_artist_commentary_desc: ""
@@ -21,11 +22,12 @@ module Sources
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/006/066/534/4k/yinan-cui-reika.jpg?1495781565"],
         page_url: "https://dantewontdie.artstation.com/projects/YZK5q",
         profile_url: "https://www.artstation.com/dantewontdie",
-        artist_name: "dantewontdie",
+        display_name: "Yinan Cui",
+        username: "dantewontdie",
         tags: %w[gantz Reika],
         artist_commentary_title: "Reika ",
         dtext_artist_commentary_desc: "From Gantz.",
-        download_size: 210_899
+        media_files: [{ file_size: 210_899 }]
       )
     end
 
@@ -33,7 +35,11 @@ module Sources
       strategy_should_work(
         "https://www.artstation.com/artwork/cody-from-sf",
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/000/144/922/4k/cassio-yoshiyaki-cody2backup2-yoshiyaki.jpg?1406314198"],
-        tags: ["Street Fighter", "Cody", "SF"]
+        display_name: "Cassio Yoshiyaki",
+        username: "yoshiyaki",
+        tags: ["Street Fighter", "Cody", "SF", "NoAI"],
+        artist_commentary_title: "Cody from SF",
+        dtext_artist_commentary_desc: "",
       )
     end
 
@@ -53,7 +59,8 @@ module Sources
         referer: "https://www.artstation.com/artwork/4BWW2",
         page_url: "https://amama.artstation.com/projects/4BWW2",
         profile_url: "https://www.artstation.com/amama",
-        artist_name: "amama"
+        display_name: "Amama L",
+        username: "amama",
       )
     end
 
@@ -67,12 +74,16 @@ module Sources
     context "An ArtStation post with images and youtube links" do
       strategy_should_work(
         "https://www.artstation.com/artwork/BDxrA",
-        image_urls: ["https://cdn.artstation.com/p/assets/images/images/006/037/253/4k/astri-lohne-sjursen-eva.jpg?1495573664"]
+        image_urls: ["https://cdn.artstation.com/p/assets/images/images/006/037/253/4k/astri-lohne-sjursen-eva.jpg?1495573664"],
+        display_name: "Astri Lohne",
+        username: "sjursen",
+        artist_commentary_title: "Akealor",
+        dtext_artist_commentary_desc: "Demon hunter commissionnnn",
       )
     end
 
     context "An ArtStation post with images and videos" do
-      strategy_should_work( # XXX Broken by Cloudflare captcha
+      strategy_should_work(
         "https://www.artstation.com/artwork/0nP1e8",
         image_urls: %w[
           https://cdn.artstation.com/p/assets/images/images/040/979/418/original/yusuf-umar-workout-10mb.gif?1630425406
@@ -82,16 +93,26 @@ module Sources
           https://cdn.artstation.com/p/assets/images/images/040/979/503/4k/yusuf-umar-4.jpg?1630425547
           https://cdn.artstation.com/p/assets/images/images/040/979/659/4k/yusuf-umar-5.jpg?1630425795
           https://cdn.artstation.com/p/assets/images/images/040/980/932/4k/yusuf-umar-tpose.jpg?1630427748
-          https://cdn-animation.artstation.com/p/video_sources/000/466/622/workout.mp4
-          https://cdn-animation.artstation.com/p/video_sources/000/466/623/workout-clay.mp4
-        ]
+          https://cdn.artstation.com/p/video_sources/000/466/622/workout.mp4
+          https://cdn.artstation.com/p/video_sources/000/466/623/workout-clay.mp4
+        ],
+        display_name: "ucupumar",
+        username: "ucupumar",
+        artist_commentary_title: "Workout",
+        dtext_artist_commentary_desc: <<~EOS.chomp
+          Workout. Created using Blender 2.93 and rendered using Eevee.
+          Blend file is available on:
+          <https://www.artstation.com/marketplace/p/v9YrA>
+          If you like my artwork, consider supporting me on Patreon: <https://www.patreon.com/ucupumar>
+        EOS
       )
     end
 
     context "An ArtStation video url" do
       strategy_should_work(
-        "https://cdn-animation.artstation.com/p/video_sources/000/466/622/workout.mp4",
-        image_urls: ["https://cdn-animation.artstation.com/p/video_sources/000/466/622/workout.mp4"]
+        "https://cdn.artstation.com/p/video_sources/000/466/622/workout.mp4",
+        image_urls: ["https://cdn.artstation.com/p/video_sources/000/466/622/workout.mp4"],
+        media_files: [{ file_size: 377_969 }],
       )
     end
 
@@ -100,7 +121,8 @@ module Sources
         "https://fiship.artstation.com/projects/x8n8XT",
         deleted: true,
         image_urls: [],
-        artist_name: "fiship",
+        display_name: nil,
+        username: "fiship",
         profile_url: "https://www.artstation.com/fiship",
         page_url: "https://fiship.artstation.com/projects/x8n8XT"
       )
@@ -110,7 +132,7 @@ module Sources
       strategy_should_work(
         "https://cdnb3.artstation.com/p/assets/images/images/003/716/071/small/aoi-ogata-hate-city.jpg?1476754974",
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/003/716/071/4k/aoi-ogata-hate-city.jpg?1476754974"],
-        download_size: 1_816_628
+        media_files: [{ file_size: 1_816_628 }]
       )
     end
 
@@ -118,7 +140,7 @@ module Sources
       strategy_should_work(
         "https://cdnb.artstation.com/p/assets/images/images/003/716/071/large/aoi-ogata-hate-city.jpg?1476754974",
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/003/716/071/4k/aoi-ogata-hate-city.jpg?1476754974"],
-        download_size: 1_816_628
+        media_files: [{ file_size: 1_816_628 }]
       )
     end
 
@@ -126,21 +148,63 @@ module Sources
       strategy_should_work(
         "https://cdna.artstation.com/p/assets/images/images/004/730/278/large/mendel-oh-dragonll.jpg",
         image_urls: ["https://cdn.artstation.com/p/assets/images/images/004/730/278/4k/mendel-oh-dragonll.jpg"],
-        download_size: 452_985
+        media_files: [{ file_size: 452_985 }]
       )
     end
 
     context "An ArtStation url with underscores in the artist name" do
       strategy_should_work(
         "https://hosi_na.artstation.com/projects/3oEk3B",
-        artist_name: "hosi_na"
+        display_name: "somi kim",
+        username: "hosi_na",
+        artist_commentary_title: "The Queen 여왕",
+        dtext_artist_commentary_desc: <<~EOS.chomp
+          The keywords of this concept are absolute Power, The Queen, and a cool-headed person.
+          컨셉 키워드는 '힘,여왕,냉정함'
+        EOS
       )
     end
 
     context "An ArtStation url with dashes in the artist name" do
       strategy_should_work(
         "https://sa-dui.artstation.com/projects/DVERn",
-        artist_name: "sa-dui"
+        display_name: "Titapa Khemakavat (Sa-Dui)",
+        username: "sa-dui",
+        artist_commentary_title: "Commission : Srevere",
+        dtext_artist_commentary_desc: <<~EOS.chomp
+          Commission for Srevere.
+          Cover image for her Pokemon-based fandom series.
+        EOS
+      )
+    end
+
+    context "An ArtStation post with HTML entities in the commentary" do
+      strategy_should_work(
+        "https://www.artstation.com/artwork/nq8go",
+        page_url: "https://idrawbagman.artstation.com/projects/nq8go",
+        image_urls: %w[
+          https://cdn.artstation.com/p/assets/images/images/006/809/536/4k/kent-davis-stillben-02.jpg?1501433242
+          https://cdn.artstation.com/p/assets/images/images/006/809/540/4k/kent-davis-theemeraldcitadelofsyngorn-03.jpg?1501433246
+          https://cdn.artstation.com/p/assets/images/images/006/809/543/4k/kent-davis-theinsatiablesanctuary-02.jpg?1501433252
+          https://cdn.artstation.com/p/assets/images/images/006/809/614/4k/kent-davis-wildemountcastle-02.jpg?1501433798
+        ],
+        display_name: "Kent Davis",
+        username: "idrawbagman",
+        other_names: ["Kent Davis", "idrawbagman"],
+        profile_url: "https://www.artstation.com/idrawbagman",
+        tags: [],
+        artist_commentary_title: "Landscapes of Tal'dorei Part 1",
+        dtext_artist_commentary_desc: <<~EOS.chomp
+          "Wildemount Castle"
+          "The Insatiable Sanctuary"
+          "Stilben"
+          "The Emerald Citadel of Syngorn"
+
+          These were featured as part of the art for the "Tal'dorei Campaign Setting" book by Matt Mercer and James Haeck. Based on locations on the continent of Tal'dorei from the D&D web series "Critical Role" by Geek & Sundry.
+
+          Copyright 2017
+          Green Ronin Publishing, LLC
+        EOS
       )
     end
 

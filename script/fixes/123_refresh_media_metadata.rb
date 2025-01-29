@@ -6,7 +6,7 @@ CurrentUser.user = User.system
 condition = ENV.fetch("COND", "TRUE")
 fix = ENV.fetch("FIX", "false").truthy?
 
-MediaAsset.active.where(condition).find_each do |asset|
+MediaAsset.active.where(condition).parallel_find_each do |asset|
   variant = asset.variant(:original)
   media_file = variant.open_file
 

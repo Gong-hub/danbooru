@@ -5,6 +5,10 @@
 #
 # @see https://github.com/danbooru/iqdb
 class IqdbClient
+  LOW_SIMILARITY_THRESHOLD = 0.0
+  HIGH_SIMILARITY_THRESHOLD = 65.0
+  DUPLICATE_THRESHOLD = 92.0
+
   class Error < StandardError; end
   attr_reader :iqdb_url, :http
 
@@ -22,25 +26,29 @@ class IqdbClient
 
   concerning :QueryMethods do
     # Search for an image by file, URL, hash, or post ID.
-    def search(post_id: nil, media_asset_id: nil, file: nil, hash: nil, url: nil, image_url: nil, file_url: nil, similarity: 0.0, high_similarity: 65.0, limit: 20)
+    def search(post_id: nil, media_asset_id: nil, file: nil, hash: nil, url: nil, image_url: nil, file_url: nil, similarity: LOW_SIMILARITY_THRESHOLD, high_similarity: HIGH_SIMILARITY_THRESHOLD, limit: 20)
       limit = limit.to_i.clamp(1, 1000)
       similarity = similarity.to_f.clamp(0.0, 100.0)
       high_similarity = high_similarity.to_f.clamp(0.0, 100.0)
+      target_url = url.presence || file_url.presence || image_url.presence
 
       if file.present?
         file = file.tempfile
-      elsif url.present?
-        extractor = Source::Extractor.find(url)
-        raise Error, "Can't do reverse image search: #{url} has multiple images. Enter the URL of a single image." if extractor.image_urls.size > 1
+      elsif target_url.present?
+        extractor = Source::Extractor.find(target_url)
 
-        download_url = extractor.image_urls.first
+        if extractor.parsed_url.image_url?
+          download_url = target_url
+        else
+          raise Error, "#{url} has multiple images. Enter the URL of a single image" if extractor.image_urls.size > 1
+          raise Error, "#{url} has no images" if extractor.image_urls.empty?
+
+          download_url = extractor.image_urls.first
+        end
+
         file = Source::Extractor.find(download_url).download_file!(download_url)
-      elsif image_url.present?
-        file = Source::Extractor.find(image_url).download_file!(image_url)
-      elsif file_url.present?
-        file = Source::Extractor.find(file_url).download_file!(file_url)
       elsif post_id.present?
-        file = Post.find(post_id).file(:preview)
+        file = Post.find(post_id).file(:"180x180")
       elsif media_asset_id.present?
         file = MediaAsset.find(media_asset_id).variant("360x360").open_file
       end
@@ -58,16 +66,15 @@ class IqdbClient
       file.try(:close)
     end
 
-    # Transform the JSON returned by IQDB to add the full post data for each
-    # match.
+    # Transform the JSON returned by IQDB to add the full post data for each match.
+    #
     # @param matches [Array<Hash>] the array of IQDB matches
     # @param low_similarity [Float] the threshold for a result to be considered low similarity
     # @param high_similarity [Float] the threshold for a result to be considered high similarity
     # @return [(Array, Array, Array)] the set of high similarity, low similarity, and all matches
     def process_results(matches, low_similarity, high_similarity)
-      matches = matches.select { |result| result["score"] >= low_similarity }
-      post_ids = matches.map { |match| match["post_id"] }
-      posts = Post.includes(:media_asset).where(id: post_ids).group_by(&:id).transform_values(&:first)
+      matches = matches.select { |match| match["score"] >= low_similarity }.sort_by { |match| -match["score"] }
+      posts = Post.includes(:media_asset).where(id: matches.pluck("post_id")).group_by(&:id).transform_values(&:first)
 
       matches = matches.map do |match|
         post = posts.fetch(match["post_id"], nil)
@@ -83,7 +90,7 @@ class IqdbClient
   # @param post [Post] the post to add
   def add_post(post)
     return unless enabled? && post.has_preview?
-    preview_file = post.file(:preview)
+    preview_file = post.file(:"180x180")
     add(post.id, preview_file)
   end
 
@@ -98,9 +105,11 @@ class IqdbClient
     # @param file [File] the image to search
     def query_file(file, limit: 20)
       media_file = MediaFile.open(file)
-      preview = media_file.preview!(Danbooru.config.small_image_width, Danbooru.config.small_image_width)
+      preview = media_file.preview!(180, 180)
       file = HTTP::FormData::File.new(preview)
       request(:post, "query", form: { file: file }, params: { limit: limit })
+    ensure
+      preview&.close
     end
 
     # Add a post to IQDB.
@@ -124,7 +133,7 @@ class IqdbClient
     def request(method, url, **options)
       return [] if !enabled?
       response = http.timeout(30).send(method, "#{iqdb_url}/#{url}", **options)
-      raise Error, "IQDB error: #{response.parse}" if response.status != 200
+      raise Error, "IQDB error: #{response.parse[:message]}" if response.status != 200
       response.parse
     end
   end

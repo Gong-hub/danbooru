@@ -15,6 +15,7 @@ class PoolTest < ActiveSupport::TestCase
   context "Searching pools" do
     should "find pools by name" do
       @pool = FactoryBot.create(:pool, name: "Test Pool")
+      @pool2 = create(:pool, name: "Yuru_Yuri_-_\\\\Akarin!!//")
 
       assert_equal(@pool.id, Pool.find_by_name("test pool").id)
 
@@ -23,6 +24,9 @@ class PoolTest < ActiveSupport::TestCase
       assert_search_equals(@pool, name_matches: "test pool")
       assert_search_equals(@pool, name_matches: "testing pool")
       assert_search_equals([], name_matches: "tes")
+
+      assert_search_equals(@pool2, name_contains: "Yuru_Yuri_-_\\\\Akarin!!//")
+      assert_search_equals(@pool2, name_matches: "Yuru_Yuri_-_\\\\Akarin!!//")
     end
 
     should "find pools by post id" do
@@ -244,9 +248,17 @@ class PoolTest < ActiveSupport::TestCase
     end
 
     context "when validating names" do
-      ["foo,bar", "foo*bar", "123", "___", "   ", "any", "none", "series", "collection"].each do |bad_name|
-        should_not allow_value(bad_name).for(:name)
-      end
+      should_not allow_value("foo,bar").for(:name)
+      should_not allow_value("foo*bar").for(:name)
+      should_not allow_value("123").for(:name)
+      should_not allow_value("any").for(:name)
+      should_not allow_value("none").for(:name)
+      should_not allow_value("series").for(:name)
+      should_not allow_value("collection").for(:name)
+      should_not allow_value("___").for(:name)
+      should_not allow_value("   ").for(:name)
+      should_not allow_value("\u200B").for(:name)
+      should_not allow_value("").for(:name)
     end
   end
 

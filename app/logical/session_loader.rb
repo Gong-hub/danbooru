@@ -7,50 +7,116 @@
 # @see ApplicationController#set_current_user
 # @see CurrentUser
 class SessionLoader
+  include ActiveModel::API
+
   class AuthenticationFailure < StandardError; end
 
-  attr_reader :session, :request, :params
+  attr_reader :session, :request, :ip_address, :params
 
   # Initialize the session loader.
   # @param request the HTTP request
   def initialize(request)
     @request = request
     @session = request.session
+    @ip_address = Danbooru::IpAddress.new(request.remote_ip)
     @params = request.query_parameters
   end
 
   # Attempt to log a user in with the given username and password. Records a
   # login attempt event and returns the user if successful.
-  # @param name [String] the username
+  # @param name_or_email [String] The user's username or email address.
   # @param password [String] the user's password
   # @return [User, nil] the user if the password was correct, otherwise nil
-  def login(name, password)
-    user = User.find_by_name(name)
+  def login(name_or_email, password)
+    user = User.find_by_name_or_email(name_or_email)
 
     if user.present? && user.authenticate_password(password)
-      session[:user_id] = user.id
-      session[:last_authenticated_at] = Time.now.utc.to_s
+      # Don't allow approvers or inactive accounts to login from proxies, unless the user has 2FA enabled.
+      if (user.is_approver? || user.last_logged_in_at < 6.months.ago) && ip_address.is_proxy? && user.totp.nil?
+        UserEvent.create_from_request!(user, :failed_login, request)
+        return nil
+      elsif user.totp.present?
+        UserEvent.create_from_request!(user, :totp_login_pending_verification, request)
+        return user
+      end
 
-      UserEvent.build_from_request(user, :login, request)
-      user.last_logged_in_at = Time.now
-      user.last_ip_addr = request.remote_ip
-      user.save!
-
-      user
+      login_user(user, :login)
     elsif user.nil?
-      nil # username incorrect
+      errors.add(:base, "Incorrect username or password")
+      nil
     else
       UserEvent.create_from_request!(user, :failed_login, request)
-      nil # password incorrect
+      errors.add(:base, "Incorrect username or password")
+      nil
+    end
+  end
+
+  # Verify whether a user's 2FA code is correct after they have logged in with their password.
+  #
+  # @param user [User] The user to authenticate.
+  # @param code [String] The user's 6-digit 2FA code, or their 8-digit backup code.
+  # @return [Boolean] True if the 2FA code is correct, or false if it's incorrect.
+  def verify_totp!(user, code)
+    if user.totp.verify(code)
+      login_user(user, :totp_login)
+      true
+    elsif user.verify_backup_code!(code)
+      login_user(user, :backup_code_login)
+      true
+    else
+      UserEvent.create_from_request!(user, :totp_failed_login, request)
+      false
+    end
+  end
+
+  def login_user(user, event_category)
+    session[:user_id] = user.id
+    session[:last_authenticated_at] = Time.now.utc.to_s
+
+    UserEvent.build_from_request(user, event_category, request)
+    user.last_logged_in_at = Time.now
+    user.last_ip_addr = request.remote_ip
+    user.save!
+
+    user
+  end
+
+  # Verify a user's password and 2FA code. Used to confirm a user's password before sensitive actions like adding API
+  # keys or changing the user's email.
+  #
+  # @param user [User] The user to reauthenticate.
+  # @param password [String] The user's password.
+  # @param verification_code [String] The user's 6-digit 2FA code, or their 8-digit backup code (if they have 2FA enabled).
+  def reauthenticate(user, password, verification_code = nil)
+    if !user.authenticate_password(password) # wrong password
+      UserEvent.create_from_request!(user, :failed_reauthenticate, request)
+      errors.add(:password, "is incorrect")
+      false
+    elsif !user.totp.present? # right password and user doesn't have 2FA
+      UserEvent.create_from_request!(user, :reauthenticate, request)
+      session[:last_authenticated_at] = Time.now.utc.to_s
+      true
+    elsif user.totp.verify(verification_code) # right password and right 2FA code
+      UserEvent.create_from_request!(user, :totp_reauthenticate, request)
+      session[:last_authenticated_at] = Time.now.utc.to_s
+      true
+    elsif user.verify_backup_code!(verification_code) # right password and right backup code
+      UserEvent.create_from_request!(user, :backup_code_reauthenticate, request)
+      session[:last_authenticated_at] = Time.now.utc.to_s
+      true
+    else # right password and wrong 2FA code or wrong backup code
+      UserEvent.create_from_request!(user, :totp_failed_reauthenticate, request)
+      errors.add(:verification_code, "is incorrect")
+      false
     end
   end
 
   # Logs the current user out. Deletes their session cookie and records a logout event.
-  def logout
+  def logout(user = CurrentUser.user)
     session.delete(:user_id)
     session.delete(:last_authenticated_at)
-    return if CurrentUser.user.is_anonymous?
-    UserEvent.create_from_request!(CurrentUser.user, :logout, request)
+    return if user.is_anonymous?
+    UserEvent.create_from_request!(user, :logout, request)
   end
 
   # Sets the current user. Runs on each HTTP request. The user is set based on
@@ -69,8 +135,6 @@ class SessionLoader
 
     if has_api_authentication?
       load_session_for_api
-    elsif params[:signed_user_id]
-      load_param_user(params[:signed_user_id])
     elsif session[:user_id]
       load_session_user
     end
@@ -96,7 +160,7 @@ class SessionLoader
 
   def set_statement_timeout
     timeout = CurrentUser.user.statement_timeout
-    ActiveRecord::Base.connection.execute("set statement_timeout = #{timeout}")
+    ActiveRecord::Base.connection.execute("SET statement_timeout = #{timeout}")
   end
 
   # Sets the current API user based on either the `login` + `api_key` URL params,
@@ -133,17 +197,16 @@ class SessionLoader
     CurrentUser.user = user
   end
 
-  # Set the current user based on the `signed_user_id` URL param. This param is used by the reset password email.
-  # XXX use rails 6.1 signed ids (https://github.com/rails/rails/blob/6-1-stable/activerecord/CHANGELOG.md)
-  def load_param_user(signed_user_id)
-    session[:user_id] = Danbooru::MessageVerifier.new(:login).verify(signed_user_id)
-    load_session_user
-  end
-
   # Set the current user based on the `user_id` session cookie.
   def load_session_user
     user = User.find_by_id(session[:user_id])
-    CurrentUser.user = user if user
+    return if user.nil?
+
+    if user.is_deleted?
+      logout(user)
+    else
+      CurrentUser.user = user
+    end
   end
 
   def update_last_logged_in_at

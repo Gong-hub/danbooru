@@ -65,7 +65,7 @@ class PostQuery
   end
 
   def builder
-    @builder ||= PostQueryBuilder.new(search, current_user, tag_limit: tag_limit, safe_mode: safe_mode)
+    @builder ||= PostQueryBuilder.new(self, current_user, tag_limit: tag_limit, safe_mode: safe_mode)
   end
 
   def search
@@ -73,7 +73,7 @@ class PostQuery
   end
 
   def ast
-    @ast ||= Parser.parse(search)
+    @ast ||= Parser.parse(search, metatags: PostQueryBuilder::METATAGS)
   end
 
   def posts
@@ -86,6 +86,18 @@ class PostQuery
     builder.paginated_posts(to_cnf, ...)
   end
 
+  # Perform a search and return N posts, or none if the search times out.
+  #
+  # @param n [Integer] The number of posts to return.
+  # @param timeout [Integer] The search timeout, in milliseconds.
+  # @param count [Integer] The number of posts matched by the search. An optional optimization if the search count is known ahead of time.
+  # @return [Array<Post>]
+  def posts_with_timeout(n, timeout: current_user.statement_timeout, count: post_count, **options)
+    Post.with_timeout(timeout, []) do
+      paginated_posts(1, limit: n, count: count, **options).to_a
+    end
+  end
+
   # The name of the only tag in the query, if the query contains a single tag. The tag may not exist. The query may contain other metatags or wildcards, and the tag may be negated.
   def tag_name
     tag_names.first if has_single_tag?
@@ -93,7 +105,7 @@ class PostQuery
 
   # The only tag in the query, if the query contains a single tag. The query may contain other metatags or wildcards, and the tag may be negated.
   def tag
-    tags.first if has_single_tag?
+    tags.to_a.first if has_single_tag?
   end
 
   # The list of all tags contained in the query.
@@ -138,7 +150,8 @@ class PostQuery
   # True if the search depends on the current user because of permissions or privacy settings.
   def is_user_dependent_search?
     metatags.any? do |metatag|
-      metatag.name.in?(%w[upvoter upvote downvoter downvote commenter comm search flagger fav ordfav favgroup ordfavgroup]) ||
+      # XXX date: is user dependent because it depends on the current user's time zone
+      metatag.name.in?(%w[date upvoter upvote downvoter downvote commenter comm search flagger fav ordfav favgroup ordfavgroup]) ||
       metatag.name == "status" && metatag.value == "unmoderated" ||
       metatag.name == "disapproved" && !metatag.value.downcase.in?(PostDisapproval::REASONS)
     end
@@ -202,6 +215,8 @@ class PostQuery
   end
 
   concerning :CountMethods do
+    extend Memoist
+
     # @return [Integer, nil] The number of posts returned by the search, or nil on timeout.
     def post_count
       @post_count ||= fast_count
@@ -222,18 +237,30 @@ class PostQuery
       count
     end
 
-    def estimated_count(timeout = 1_000)
-      if is_empty_search?
-        estimated_row_count
+    # @param timeout [Integer] The maximum amount of time to spend calculating the count.
+    # @param exact_count_threshold [Integer] If the estimate is below this threshold, return an exact count instead.
+    # @return [Integer, nil] The estimated post count, or nil if we can't compute a good estimate.
+    def estimated_count(timeout = 1_000, exact_count_threshold: 20_000)
+      if is_empty_search? || is_metatag?(:rating)
+        # If there's a small number of posts, then the estimate may be noticeably off if the table hasn't been vacuumed
+        # recently. Return the exact number of posts because calculating it is fast enough anyway.
+        if estimated_row_count < exact_count_threshold
+          exact_count(timeout)
+        else
+          estimated_row_count
+        end
       elsif is_simple_tag?
         tag.try(:post_count)
-      elsif is_metatag?(:rating)
-        estimated_row_count
       elsif (is_metatag?(:status) || is_metatag?(:is)) && metatags.sole.value.in?(%w[pending flagged appealed modqueue unmoderated])
         exact_count(timeout)
       elsif is_metatag?(:pool) || is_metatag?(:ordpool)
         name = find_metatag(:pool, :ordpool)
-        Pool.find_by_name(name)&.post_count || 0
+
+        if name.downcase.in?(Pool::RESERVED_NAMES)
+          nil
+        else
+          Pool.find_by_name(name)&.post_count || 0
+        end
       elsif is_metatag?(:fav) || is_metatag?(:ordfav)
         name = find_metatag(:fav, :ordfav)
         user = User.find_by_name(name)
@@ -249,7 +276,7 @@ class PostQuery
     end
 
     # Estimate the count by parsing the Postgres EXPLAIN output.
-    def estimated_row_count
+    memoize def estimated_row_count
       ExplainParser.new(posts).row_count
     end
 
@@ -267,9 +294,9 @@ class PostQuery
 
     def count_cache_key
       if is_user_dependent_search?
-        "pfc[#{current_user.id.to_i}]:#{to_s}"
+        "post-count-for-user:#{current_user.id.to_i}:#{to_s}"
       else
-        "pfc:#{to_s}"
+        "post-count:#{to_s}"
       end
     end
   end

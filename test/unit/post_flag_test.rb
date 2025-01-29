@@ -14,8 +14,7 @@ class PostFlagTest < ActiveSupport::TestCase
 
     context "a user with unlimited flags" do
       should "be able to flag an unlimited number of posts" do
-        @user = create(:user)
-        create_list(:post_flag, 30, status: :succeeded, creator: @user)
+        @user = create(:approver)
 
         assert_equal(true, @user.has_unlimited_flags?)
         assert_equal(false, @user.is_flag_limited?)
@@ -113,6 +112,14 @@ class PostFlagTest < ActiveSupport::TestCase
           assert_equal(true, @post.reload.is_flagged?)
         end
       end
+    end
+
+    context "during validation" do
+      subject { build(:post_flag) }
+
+      should_not allow_value("").for(:reason)
+      should_not allow_value(" ").for(:reason)
+      should_not allow_value("\u200B").for(:reason)
     end
   end
 end

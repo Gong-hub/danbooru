@@ -2,12 +2,16 @@
 
 class Pool < ApplicationRecord
   class RevertError < StandardError; end
+
+  RESERVED_NAMES = %w[none any series collection]
   POOL_ORDER_LIMIT = 1000
 
   array_attribute :post_ids, parse: /\d+/, cast: :to_i
+  dtext_attribute :description # defines :dtext_description
 
-  validates :name, uniqueness: { case_sensitive: false }, if: :name_changed?
+  validates :name, visible_string: true, uniqueness: { case_sensitive: false }, length: { minimum: 3, maximum: 170 }, if: :name_changed?
   validate :validate_name, if: :name_changed?
+  validates :description, length: { maximum: 20_000 }, if: :description_changed?
   validates :category, inclusion: { in: %w[series collection] }
   validate :updater_can_edit_deleted
   before_validation :normalize_post_ids
@@ -15,6 +19,7 @@ class Pool < ApplicationRecord
   after_save :create_version
 
   has_many :mod_actions, as: :subject, dependent: :destroy
+  has_many :reactions, as: :model, dependent: :destroy
 
   deletable
   has_dtext_links :description
@@ -25,7 +30,7 @@ class Pool < ApplicationRecord
   module SearchMethods
     def name_contains(name)
       name = normalize_name_for_search(name)
-      name = "*#{name}*" unless name =~ /\*/
+      name = "*#{name.escape_wildcards}*" unless name.include?("*")
       where_ilike(:name, name)
     end
 
@@ -234,9 +239,9 @@ class Pool < ApplicationRecord
   end
 
   def validate_name
-    case name
-    when /\A(any|none|series|collection)\z/i
-      errors.add(:name, "cannot be any of the following names: any, none, series, collection")
+    case name.downcase
+    when *RESERVED_NAMES
+      errors.add(:name, "cannot be any of the following names: #{RESERVED_NAMES.to_sentence(last_word_connector: ", or ")}")
     when /,/
       errors.add(:name, "cannot contain commas")
     when /\*/
@@ -258,7 +263,9 @@ class Pool < ApplicationRecord
 
   def self.rewrite_wiki_links!(old_name, new_name)
     Pool.linked_to(old_name).each do |pool|
-      pool.lock!.update!(description: DText.rewrite_wiki_links(pool.description, old_name, new_name))
+      pool.with_lock do
+        pool.update!(description: DText.new(pool.description).rewrite_wiki_links(old_name, new_name).to_s)
+      end
     end
   end
 end

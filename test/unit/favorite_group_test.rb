@@ -20,6 +20,22 @@ class FavoriteGroupTest < ActiveSupport::TestCase
     end
   end
 
+  context "Searching favgroups" do
+    should "find favgroups by name" do
+      @f1 = create(:favorite_group, name: "Test Group")
+      @f2 = create(:favorite_group, name: "Yuru_Yuri_-_\\\\Akarin!!//")
+
+      assert_search_equals(@f1, name_contains: "test group")
+      assert_search_equals(@f1, name_contains: "tes")
+      assert_search_equals(@f1, name_matches: "test group")
+      assert_search_equals(@f1, name_matches: "testing group")
+      assert_search_equals([],  name_matches: "tes")
+
+      assert_search_equals(@f2, name_contains: "Yuru_Yuri_-_\\\\Akarin!!//")
+      assert_search_equals(@f2, name_matches: "Yuru_Yuri_-_\\\\Akarin!!//")
+    end
+  end
+
   context "expunging a post" do
     should "remove it from all favorite groups" do
       @post = create(:post_with_file, filename: "test.jpg")
@@ -57,5 +73,19 @@ class FavoriteGroupTest < ActiveSupport::TestCase
       refute(@fav_group.valid?)
       assert_equal([], @fav_group.reload.post_ids)
     end
+  end
+
+  context "when validating names" do
+    subject { build(:favorite_group) }
+
+    should_not allow_value("foo,bar").for(:name)
+    should_not allow_value("foo*bar").for(:name)
+    should_not allow_value("123").for(:name)
+    should_not allow_value("_").for(:name)
+    should_not allow_value("any").for(:name)
+    should_not allow_value("none").for(:name)
+    should_not allow_value("").for(:name)
+    should_not allow_value("   ").for(:name)
+    should_not allow_value("\u200B").for(:name)
   end
 end

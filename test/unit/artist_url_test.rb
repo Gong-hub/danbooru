@@ -51,6 +51,26 @@ class ArtistURLTest < ActiveSupport::TestCase
       assert_equal("https://artistname.example.com", url.url)
     end
 
+    should "decode encoded URLs" do
+      url = create(:artist_url, url: "https://arca.live/u/@%EC%9C%BE%ED%8C%8C")
+      assert_equal("https://arca.live/u/@윾파", url.url)
+    end
+
+    should "percent-encode spaces" do
+      url = create(:artist_url, url: "http://dic.nicovideo.jp/a/tetla pot")
+      assert_equal("http://dic.nicovideo.jp/a/tetla%20pot", url.url)
+    end
+
+    should "not fail when decoding percent-encoded Shift JIS URLs" do
+      url = create(:artist_url, url: "https://www.digiket.com/abooks/result/_data/staff=%8F%BC%94C%92m%8A%EE")
+      assert_equal("https://www.digiket.com/abooks/result/_data/staff=%8F%BC%94C%92m%8A%EE", url.url)
+    end
+
+    should "not apply NFKC normalization to URLs" do
+      url = create(:artist_url, url: "https://arca.live/u/@ㅇㅇ/43979125")
+      assert_equal("https://arca.live/u/@ㅇㅇ/43979125", url.url)
+    end
+
     should "normalize ArtStation urls" do
       url = create(:artist_url, url: "https://artstation.com/koyorin")
       assert_equal("https://www.artstation.com/koyorin", url.url)
@@ -181,6 +201,9 @@ class ArtistURLTest < ActiveSupport::TestCase
         assert_search_equals([@bkub_url], url_matches: "*bkub*")
         assert_search_equals([@bkub_url], url_matches: "/^https?://bkub\.com$/")
         assert_search_equals([@bkub_url], url_matches: "https://bkub.com")
+        assert_search_equals([@bkub_url], url_matches: "http://bkub.com")
+        assert_search_equals([@bkub_url], url_matches: "http://bkub.com/")
+        assert_search_equals([@bkub_url], url_matches: "http://BKUB.com/")
         assert_search_equals([@masao_url, @bkub_url], url_matches: "https://bkub.com https://masao.com")
         assert_search_equals([@masao_url, @bkub_url], url_matches: ["https://bkub.com", "https://masao.com"])
 
@@ -193,6 +216,12 @@ class ArtistURLTest < ActiveSupport::TestCase
         assert_search_equals([@bkub_url], url_not_ilike: "*MASAO*")
         assert_search_equals([@bkub_url], url_regex: "bkub")
         assert_search_equals([@bkub_url], url_not_regex: "masao")
+      end
+
+      should "work when searching for URLs containing backslashes" do
+        @url = create(:artist_url, url: "https://twitter.com/foo\\\\bar")
+
+        assert_search_equals([@url], url_matches: "foo\\\\bar")
       end
     end
   end

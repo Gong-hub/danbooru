@@ -6,90 +6,84 @@ class Source::Extractor
       Danbooru.config.fantia_session_id.present?
     end
 
-    def match?
-      Source::URL::Fantia === parsed_url
-    end
-
     def image_urls
-      return [parsed_url.full_image_url] if parsed_url.full_image_url.present?
-      return [image_from_downloadable(parsed_url)] if parsed_url.downloadable?
-
-      images = images_for_post.presence || images_for_product.presence || []
-
-      full_images = images.compact.map do |image|
-        parsed = Source::URL.parse(image)
-        if parsed&.full_image_url.present?
-          parsed.full_image_url
-        elsif parsed&.downloadable?
-          image_from_downloadable(parsed)
-        else
-          image
-        end
+      if parsed_url.full_image_url.present?
+        [parsed_url.full_image_url]
+      elsif parsed_url.candidate_full_image_urls.present?
+        url = parsed_url.candidate_full_image_urls.find { |url| http_exists?(url) } || parsed_url.to_s
+        [url]
+      elsif parsed_url.download_url.present?
+        [http.cache(1.minute).redirect_url(parsed_url.download_url).to_s].compact_blank
+      elsif parsed_url.image_url?
+        [parsed_url.to_s]
+      elsif work_type == "post"
+        images_for_post.flat_map { |url| Source::URL.parse(url)&.extractor&.image_urls }.compact.uniq
+      elsif work_type == "product"
+        images_for_product.flat_map { |url| Source::URL.parse(url)&.extractor&.image_urls }.compact.uniq
+      else
+        []
       end
-      full_images.compact.uniq
-    end
-
-    def image_from_downloadable(url)
-      resp = http.head(url)
-      return url if resp.status != 200
-      resp.uri.to_s
     end
 
     def images_for_post
       return [] unless api_response.present?
-      images = [api_response.dig("post", "thumb_micro")]
-      api_response.dig("post", "post_contents").to_a.map do |content|
+
+      images = api_response.dig("post", "post_contents").to_a.map do |content|
         next if content["visible_status"] != "visible"
 
         case content["category"]
         when "photo_gallery"
-          content["post_content_photos"].to_a.map { |i| images << i.dig("url", "original") }
+          content["post_content_photos"].to_a.map { |i| i.dig("url", "original") }
         when "file"
-          images << image_from_downloadable("https://www.fantia.jp/#{content["download_uri"]}")
+          [URI.join("https://fantia.jp", content["download_uri"]).to_s]
         when "blog"
-          begin
-            sub_json = JSON.parse(content["comment"])
-          rescue Json::ParserError
-            sub_json = {}
+          comment = content["comment"]&.parse_json || {}
+
+          comment["ops"].to_a.pluck("insert").grep(Hash).filter_map do |node|
+            if node.dig("fantiaImage", "original_url").present?
+              "https://fantia.jp#{node.dig("fantiaImage", "original_url")}"
+            else
+              node["image"]
+            end
           end
-          sub_json["ops"].to_a.map { |js| images << js.dig("insert", "fantiaImage", "url") }
         end
-      end
-      images
+      end.flatten.compact
+
+      thumb_micro = api_response.dig("post", "thumb_micro")
+      [thumb_micro, *images].compact
     end
 
     def images_for_product
-      html_response&.css(".product-gallery-item .img-fluid").to_a.map do |element|
+      return [] unless work_type == "product"
+
+      page&.css(".product-gallery-item .img-fluid").to_a.map do |element|
         element["src"] unless element["src"] =~ %r{/fallback/}
       end.compact
-    end
-
-    def page_url
-      parsed_url.page_url || parsed_referer&.page_url
     end
 
     def tags
       case work_type
       when "post"
         api_response&.dig("post", "tags").to_a.map do |tag|
-          [tag["name"], "https://fantia.jp/posts?tag=#{tag["name"]}"]
+          [tag["name"], "https://fantia.jp/posts?tag=#{Danbooru::URL.escape(tag["name"])}"]
         end
       when "product"
-        html_response&.css(".product-category a").to_a.map do |element|
+        page&.css(".product-category a").to_a.map do |element|
           tag_name = element.text.delete_prefix("#")
-          [tag_name, "https://fantia.jp/products?product_category=##{tag_name}"]
+          [tag_name, "https://fantia.jp/products?tag=#{Danbooru::URL.escape(tag_name)}"]
         end
       else
         []
       end
     end
 
-    def other_names
+    def artist_name
       case work_type
       when "post"
-        [api_response&.dig("post", "fanclub", "creator_name")].compact
+        api_response&.dig("post", "fanclub", "creator_name")
       when "product"
-        [html_response&.at(".fanclub-name a")&.text].compact
+        # "⚡️電波暗室⚡️ (弱電波@JackDempa)"
+        page&.at(".fanclub-name a")&.text&.slice(/\A(.*) \((.*)\)\z/, 2)
       end
     end
 
@@ -97,12 +91,10 @@ class Source::Extractor
       case work_type
       when "post"
         fanclub_id = api_response&.dig("post", "fanclub", "id")
-        return unless fanclub_id.present?
-        "https://fantia.jp/fanclubs/#{fanclub_id}"
+        "https://fantia.jp/fanclubs/#{fanclub_id}" if fanclub_id.present?
       when "product"
-        href = html_response&.at(".fanclub-name a")&.[]("href")
-        return unless href.present?
-        URI.join("https://fantia.jp/", href).to_s
+        href = page&.at(".fanclub-name a")&.attr("href")
+        URI.join("https://fantia.jp/", href).to_s if href.present?
       end
     end
 
@@ -111,7 +103,7 @@ class Source::Extractor
       when "post"
         api_response&.dig("post", "title")
       when "product"
-        html_response&.at(".product-title")&.text
+        page&.at(".product-title")&.text
       end
     end
 
@@ -120,12 +112,12 @@ class Source::Extractor
       when "post"
         api_response&.dig("post", "comment")
       when "product"
-        html_response&.at(".product-description")&.text
+        page&.at(".product-description")&.text
       end
     end
 
     def dtext_artist_commentary_desc
-      DText.from_html(artist_commentary_desc)
+      DText.from_plaintext(artist_commentary_desc)
     end
 
     def work_type
@@ -136,24 +128,26 @@ class Source::Extractor
       parsed_url.work_id || parsed_referer&.work_id
     end
 
-    def api_response
-      return {} unless work_type == "post"
-      api_url = "https://fantia.jp/api/v1/posts/#{work_id}"
-
-      response = http.cache(1.minute).get(api_url)
-      return {} unless response.status == 200
-
-      JSON.parse(response)
-    rescue JSON::ParserError
-      {}
+    memoize def page
+      case work_type
+      when "post"
+        http.cache(1.minute).parsed_get("https://fantia.jp/posts/#{work_id}")
+      when "product"
+        http.cache(1.minute).parsed_get("https://fantia.jp/products/#{work_id}")
+      end
     end
 
-    def html_response
-      return nil unless work_type == "product"
-      response = http.cache(1.minute).get("https://fantia.jp/products/#{work_id}")
+    memoize def csrf_token
+      page&.css('meta[name="csrf-token"]')&.attr("content")&.value if work_type == "post"
+    end
 
-      return nil unless response.status == 200
-      response.parse
+    memoize def api_response
+      return {} unless work_type == "post" && csrf_token.present?
+
+      http.cache(1.minute).headers(
+        "X-CSRF-Token": csrf_token,
+        "X-Requested-With": "XMLHttpRequest"
+      ).parsed_get("https://fantia.jp/api/v1/posts/#{work_id}") || {}
     end
 
     def http

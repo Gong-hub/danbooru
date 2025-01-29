@@ -6,6 +6,20 @@
 class DanbooruLogger
   HEADERS = %w[referer sec-fetch-dest sec-fetch-mode sec-fetch-site sec-fetch-user]
 
+  attr_reader :logger, :default_level
+
+  # @param logger [Logger] The logger to send messages to.
+  # @param default_level [Integer] The default log level for messages added with `<<`.
+  def initialize(logger: Rails.logger, default_level: Logger::INFO)
+    @logger = logger
+    @default_level = default_level
+  end
+
+  # Log a message at the default log level.
+  def <<(message)
+    logger.add(default_level, message.chomp)
+  end
+
   # Log a message to the Rails log and to the APM.
   #
   # @param message [String] the message to log
@@ -96,18 +110,12 @@ class DanbooruLogger
   private_class_method
 
   def self.log_attributes(attributes)
-    attributes.each do |key, value|
-      ElasticAPM.set_label(key, value)
-    end
   end
 
   def self.log_exception(exception, expected: false, custom_params: {})
-    ElasticAPM.report(exception, handled: expected)
   end
 
   def self.log_event(level, message: nil, **params)
-    ElasticAPM.set_custom_context(params)
-    ElasticAPM.report_message(message)
   end
 
   # flatten_hash({ foo: { bar: { baz: 42 } } })

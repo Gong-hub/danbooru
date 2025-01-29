@@ -1,14 +1,23 @@
 require "test_helper"
 
 class PostsControllerTest < ActionDispatch::IntegrationTest
-  def assert_canonical_url_equals(expected)
+  def assert_seo_canonical_url_equals(expected)
     assert_equal(expected, response.parsed_body.css("link[rel=canonical]").attribute("href").value)
   end
 
-  def create_post!(user: create(:user), media_asset: build(:media_asset), rating: "q", tag_string: "tagme", **params)
+  def assert_post_source_equals(expected_source, source_url, page_url = nil)
+    post = create_post!(source_url: source_url, page_url: page_url)
+
+    assert_response :redirect
+    assert_equal(expected_source, post.source)
+  end
+
+  def create_post!(user: create(:user), media_asset: build(:media_asset), rating: "q", tag_string: "tagme", source_url: nil, page_url: nil, **params)
     upload = build(:upload, uploader: user, media_asset_count: 1, status: "completed")
-    asset = create(:upload_media_asset, upload: upload, media_asset: media_asset)
-    post_auth posts_path, user, params: { upload_media_asset_id: asset.id, post: { rating: rating, tag_string: tag_string, **params }}
+    asset = create(:upload_media_asset, upload: upload, media_asset: media_asset, **{ source_url: source_url, page_url: page_url }.compact_blank)
+
+    RateLimit.delete_all
+    post_auth posts_path, user, params: { upload_media_asset_id: asset.id, post: { rating: rating, source: asset.canonical_url, tag_string: tag_string, **params }}
 
     Post.last
   end
@@ -17,6 +26,7 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
     setup do
       @user = travel_to(1.month.ago) {create(:user)}
       @post = as(@user) { create(:post, tag_string: "aaaa") }
+      Danbooru.config.stubs(:canonical_url).returns("http://www.example.com")
     end
 
     context "index action" do
@@ -63,21 +73,21 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
         should "render the first page" do
           get root_path
           assert_response :success
-          assert_canonical_url_equals(root_url(host: Danbooru.config.hostname))
+          assert_seo_canonical_url_equals(root_url)
 
           get posts_path
           assert_response :success
-          assert_canonical_url_equals(root_url(host: Danbooru.config.hostname))
+          assert_seo_canonical_url_equals(root_url)
 
           get posts_path(page: 1)
           assert_response :success
-          assert_canonical_url_equals(root_url(host: Danbooru.config.hostname))
+          assert_seo_canonical_url_equals(root_url)
         end
 
         should "render the second page" do
           get posts_path(page: 2, limit: 1)
           assert_response :success
-          assert_canonical_url_equals(posts_url(page: 2, limit: 1, host: Danbooru.config.hostname))
+          assert_seo_canonical_url_equals(posts_url(page: 2, limit: 1))
         end
       end
 
@@ -86,7 +96,7 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
           get posts_path, params: { tags: "does_not_exist" }
           assert_response :success
           assert_select "#show-excerpt-link", count: 0
-          assert_canonical_url_equals(posts_url(tags: "does_not_exist", host: Danbooru.config.hostname))
+          assert_seo_canonical_url_equals(posts_url(tags: "does_not_exist"))
         end
 
         should "render for an artist tag" do
@@ -178,6 +188,19 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
         should "show a notice for a single tag search with a pending BUR" do
           create(:post, tag_string: "foo")
           create(:bulk_update_request, script: "create alias foo -> bar")
+          get_auth posts_path(tags: "foo"), @user
+          assert_select ".tag-change-notice"
+        end
+
+        should "show a notice for a single tag search with multiple pending BURs in multiple topics" do
+          topic1 = as(@user) { create(:forum_topic) }
+          topic2 = as(@user) { create(:forum_topic) }
+          create(:post, tag_string: "foo")
+          create(:bulk_update_request, script: "create alias foo -> bar", forum_topic: topic1)
+          create(:bulk_update_request, script: "create alias foo -> baz", forum_topic: topic1)
+          create(:bulk_update_request, script: "create alias foo -> qux", forum_topic: topic2)
+          create(:bulk_update_request, script: "create alias foo -> blah", forum_topic: topic2)
+
           get_auth posts_path(tags: "foo"), @user
           assert_select ".tag-change-notice"
         end
@@ -455,6 +478,8 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
 
       context "in safe mode" do
         should "not include the rating:s tag in the page title" do
+          Danbooru.config.stubs(:app_name).returns("Safebooru")
+
           get posts_path(tags: "fate/grand_order", safe_mode: true)
           assert_select "title", text: "Fate/Grand Order | Safebooru"
         end
@@ -498,14 +523,14 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
     context "random action" do
       should "render" do
         get random_posts_path, params: { tags: "aaaa" }
-        assert_redirected_to(post_path(@post, tags: "aaaa"))
+        assert_redirected_to(post_path(@post, q: "aaaa"))
       end
 
       should "render for a ordfav: search" do
         @post = as(@user) { create(:post, tag_string: "fav:me") }
         get random_posts_path, params: { tags: "ordfav:#{@user.name}" }
 
-        assert_redirected_to(post_path(@post, tags: "ordfav:#{@user.name}"))
+        assert_redirected_to(post_path(@post, q: "ordfav:#{@user.name}"))
       end
 
       should "return a 404 when no random posts can be found" do
@@ -578,7 +603,7 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
           get_auth post_path(@post), @user
 
           assert_response :success
-          assert_select ".post-flag-reason a:first", true, text: "edit"
+          assert_select ".post-flag-reason a:first", "edit"
         end
       end
 
@@ -784,10 +809,49 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
 
         assert_equal(false, @post.artist_commentary.present?)
       end
+
+      should "set the correct source after upload" do
+        assert_post_source_equals("https://i.pximg.net/img-original/img/2017/08/18/00/09/21/64476642_p0.jpg", "https://i.pximg.net/img-original/img/2017/08/18/00/09/21/64476642_p0.jpg")
+        assert_post_source_equals("https://i.pximg.net/img-original/img/2017/08/18/00/09/21/64476642_p0.jpg", "https://i.pximg.net/img-original/img/2017/08/18/00/09/21/64476642_p0.jpg", "https://www.pixiv.net/en/artworks/64476642")
+
+        assert_post_source_equals("https://pbs.twimg.com/media/DCdZ_FhUIAAYKFN.jpg:orig", "https://pbs.twimg.com/media/DCdZ_FhUIAAYKFN.jpg:orig")
+        assert_post_source_equals("https://twitter.com/noizave/status/875768175136317440", "https://pbs.twimg.com/media/DCdZ_FhUIAAYKFN.jpg:orig", "https://twitter.com/noizave/status/875768175136317440")
+
+        assert_post_source_equals("https://noizave.tumblr.com/post/162206271767", "https://media.tumblr.com/3bbfcbf075ddf969c996641b264086fd/tumblr_os2buiIOt51wsfqepo1_1280.png")
+
+        assert_post_source_equals(
+          "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/intermediary/f/8b472d70-a0d6-41b5-9a66-c35687090acc/d23jbr4-8a06af02-70cb-46da-8a96-42a6ba73cdb4.jpg/v1/fill/w_786,h_1017,q_70,strp/silverhawks_quicksilver_by_edsfox_d23jbr4-pre.jpg",
+          "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/intermediary/f/8b472d70-a0d6-41b5-9a66-c35687090acc/d23jbr4-8a06af02-70cb-46da-8a96-42a6ba73cdb4.jpg/v1/fill/w_786,h_1017,q_70,strp/silverhawks_quicksilver_by_edsfox_d23jbr4-pre.jpg"
+        )
+
+        assert_post_source_equals(
+          "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/intermediary/f/8b472d70-a0d6-41b5-9a66-c35687090acc/d23jbr4-8a06af02-70cb-46da-8a96-42a6ba73cdb4.jpg/v1/fill/w_786,h_1017,q_70,strp/silverhawks_quicksilver_by_edsfox_d23jbr4-pre.jpg",
+          "https://images-wixmp-ed30a86b8c4ca887773594c2.wixmp.com/intermediary/f/8b472d70-a0d6-41b5-9a66-c35687090acc/d23jbr4-8a06af02-70cb-46da-8a96-42a6ba73cdb4.jpg/v1/fill/w_786,h_1017,q_70,strp/silverhawks_quicksilver_by_edsfox_d23jbr4-pre.jpg",
+          "https://www.deviantart.com/edsfox/art/Silverhawks-Quicksilver-126872896"
+        )
+
+        assert_post_source_equals("https://cdna.artstation.com/p/assets/images/images/000/705/368/large/jey-rain-one1.jpg?1443931773", "https://cdna.artstation.com/p/assets/images/images/000/705/368/large/jey-rain-one1.jpg?1443931773")
+        assert_post_source_equals("https://jeyrain.artstation.com/projects/04XA4", "https://cdna.artstation.com/p/assets/images/images/000/705/368/large/jey-rain-one1.jpg?1443931773", "https://www.artstation.com/artwork/04XA4")
+
+        assert_post_source_equals("https://i0.hdslb.com/bfs/album/669c0974a2a7508cbbb60b185eddaa0ccf8c5b7a.jpg", "https://i0.hdslb.com/bfs/album/669c0974a2a7508cbbb60b185eddaa0ccf8c5b7a.jpg")
+        assert_post_source_equals("https://h.bilibili.com/83341894", "https://i0.hdslb.com/bfs/album/669c0974a2a7508cbbb60b185eddaa0ccf8c5b7a.jpg", "https://h.bilibili.com/83341894")
+
+        assert_post_source_equals("https://i0.hdslb.com/bfs/new_dyn/675526fd8baa2f75d7ea0e7ea957bc0811742550.jpg", "https://i0.hdslb.com/bfs/new_dyn/675526fd8baa2f75d7ea0e7ea957bc0811742550.jpg")
+        assert_post_source_equals("https://t.bilibili.com/686082748803186697", "https://i0.hdslb.com/bfs/new_dyn/675526fd8baa2f75d7ea0e7ea957bc0811742550.jpg", "https://t.bilibili.com/686082748803186697")
+
+        assert_post_source_equals("https://i.4cdn.org/vt/1611919211191.jpg", "https://i.4cdn.org/vt/1611919211191.jpg")
+        assert_post_source_equals("https://boards.4channel.org/vt/thread/1#p1", "https://i.4cdn.org/vt/1611919211191.jpg", "https://boards.4channel.org/vt/thread/1")
+      end
+
+      should "not normalize source URLs to NFC form" do
+        # ブ = U+30D5 U+3099 ('KATAKANA LETTER HU', 'COMBINING KATAKANA-HIRAGANA VOICED SOUND MARK')
+        source = "https://tuyu-official.jp/wp/wp-content/uploads/2022/09/雨模様［サブスクジャケット］.jpeg"
+        assert_post_source_equals(source, source)
+      end
     end
 
     context "update action" do
-      should "work" do
+      should "redirect to the post on success" do
         put_auth post_path(@post), @user, params: {:post => {:tag_string => "bbb"}}
         assert_redirected_to post_path(@post)
 
@@ -811,6 +875,13 @@ class PostsControllerTest < ActionDispatch::IntegrationTest
         put_auth post_path(@post), create(:restricted_user), params: { post: { tag_string: "blah" }}
         assert_response 403
         assert_not_equal("blah", @post.reload.tag_string)
+      end
+
+      should "not raise an exception on validation error" do
+        put_auth post_path(@post), @user, params: { post: { parent_id: @post.id }}
+        assert_redirected_to post_path(@post)
+
+        assert_nil(@post.parent_id)
       end
     end
 
